@@ -692,7 +692,11 @@ every entry on every bundle this code can produce - no settings shape declares a
 yet, so serving starts only when every configured source loaded, and an entry's `reached` is
 therefore always true. Both fields are carried because the availability rules this section decided
 land on top of them; a deployment that can declare `optional` is the diff that first writes a value
-other than `required`. And a manifest entry carries the source's *declared* capabilities - what the
+other than `required`. **Amended by `github.com/telekom/sutura#639`:** the pre-built half of that -
+an `Optional` enum variant and a `Contribution::missing` constructor to produce it - is deleted,
+because nothing called it and a state no deployment can reach is a combination the type admitted and
+the constructors did not produce. The serialized form above is unchanged, so no digest moves; the
+diff that declares availability adds the variant beside its producer rather than finding it waiting. And a manifest entry carries the source's *declared* capabilities - what the
 composition recorded it as providing - which is not a content hash per source: two different bundles
 from the same reachable sources are told apart by the assembly, exactly as before.
 
