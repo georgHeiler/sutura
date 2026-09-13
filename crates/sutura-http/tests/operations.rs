@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod tests {
+    use axum::http::Method;
     use sutura_http::capability::{capability_of, governed};
     use sutura_http::constants::HEALTH_PATH;
     use sutura_http::openapi::document;

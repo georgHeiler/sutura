@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use axum::Router;
 use axum::body::Body;
-use axum::extract::Request;
 use axum::http::StatusCode;
 use sutura_config::Environment;
 use tower::ServiceExt as _;

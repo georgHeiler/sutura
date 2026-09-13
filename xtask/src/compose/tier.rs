@@ -184,8 +184,10 @@ fn remove_selected_volume(root: &Path, project: &str, logical: &str) -> Result<(
     Ok(())
 }
 
+type VolumeSelection<'a> = Result<Option<&'a str>, Vec<&'a str>>;
+
 /// Return the sole expected volume, or refuse an unexpected label result.
-fn volume_selection<'a>(found: &[&'a str], expected: &str) -> Result<Option<&'a str>, Vec<&'a str>> {
+fn volume_selection<'a>(found: &[&'a str], expected: &str) -> VolumeSelection<'a> {
     match found {
         [] => Ok(None),
         [only] if *only == expected => Ok(Some(only)),
