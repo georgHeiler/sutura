@@ -5,6 +5,8 @@
 //! privacy-safe result census: topology and outcome class, never question, model, row, path or error.
 //! RSS is a child-process high-water delta from the post-setup baseline; it is not a process-memory
 //! bound, and pool peak is only the engine operator-reservation bound.
+//! The pool recorder's unit test remains in the existing leased pool test file, so causality covers
+//! the newly added child-process and census tests; the existing recorder test has no base red state.
 
 use std::num::NonZeroUsize;
 use std::process::Command;
