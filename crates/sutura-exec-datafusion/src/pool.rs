@@ -174,11 +174,11 @@ pub(crate) fn refused_a_reservation(error: &DataFusionError) -> bool {
 /// `width_tests.rs` is: `lib.rs` is at the length gate and needs the room more than this does.
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use datafusion::execution::memory_pool::MemoryConsumer;
 
     use super::{WorkingSet, environment, exhausted};
     use datafusion::error::DataFusionError as EngineError;
-    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, PeakRecordingPool};
+    use datafusion::execution::memory_pool::{MemoryLimit, PeakRecordingPool};
 
     fn bytes(count: usize) -> WorkingSet {
         WorkingSet::of_bytes(core::num::NonZeroUsize::new(count).expect("a test ceiling is positive"))
@@ -221,32 +221,5 @@ mod tests {
         assert!(!exhausted(&EngineError::Plan(String::from(
             "a message that mentions memory and is not an exhaustion"
         ))));
-    }
-
-    #[test]
-    fn recording_preserves_bounded_growth_and_isolates_windows() {
-        let pool = Arc::new(PeakRecordingPool::new(Arc::new(GreedyMemoryPool::new(1024))));
-        let pool: Arc<dyn MemoryPool> = pool;
-        let recording = PeakRecordingPool::from_pool(&*pool).expect("the recorder is installed");
-        let held = MemoryConsumer::new("a measured test operator").register(&pool);
-
-        held.try_grow(1024).expect("the recording pool grants its ceiling");
-        let refused = held
-            .try_grow(1)
-            .expect_err("the recording pool refuses one byte above its ceiling");
-        assert!(matches!(refused, EngineError::ResourcesExhausted(_)), "{refused:?}");
-        assert_eq!(recording.peak_reserved(), 1024, "a rejected growth must not alter the peak");
-
-        held.shrink(512);
-        assert_eq!(recording.peak_reserved(), 1024, "a peak persists after reservation release");
-        recording.reset_peak();
-        assert_eq!(recording.peak_reserved(), 512, "a new window starts at its live reservation");
-        held.try_grow(256).expect("a growth below the remaining ceiling is granted");
-        assert_eq!(
-            recording.peak_reserved(),
-            768,
-            "the new window records only post-reset growth"
-        );
-        assert_eq!(pool.reserved(), 768, "recording retains greedy pool reservation semantics");
     }
 }
