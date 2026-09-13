@@ -235,12 +235,6 @@ pub fn attach_csv(&self, table: &TableName, path: &Path) -> Result<(), DataFusio
 Attaches one CSV table to the measured child.
 
 ```rust
-pub fn execute(&self, executable: Executable<'_>, presented: &Presented) -> Result<RowSet, DataFusionError>
-```
-
-Executes one plan through the measured child.
-
-```rust
 pub fn new(source: SourceName, posture: SourcePosture, working_set: WorkingSet) -> Result<Self, DataFusionError>
 ```
 
