@@ -218,6 +218,13 @@ ci:
         nix build ".#checks.$system.$check" -L
     done
 
+# Run every fresh-child bounded corpus measurement.
+measure-bounds:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "measure-bounds: scope sutura-app differential bounds - exact 80-record fresh-child census; RSS is a post-setup HWM delta. Wider coverage is in `just test`."
+    python3 nix/measure-bounds.py 80 cargo test -p sutura-app --test differential federated::bounds::every_corpus_question_has_one_fresh_child_outcome_in_each_topology -- --exact --nocapture
+
 # The fat-LTO build. Opt-in, never automatic: minutes of build time for throughput nobody
 # has measured yet.
 perf:
