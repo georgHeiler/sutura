@@ -229,6 +229,17 @@ impl Value {
             Self::Text(ref v) => v.clone(),
         }
     }
+
+    /// The byte length [`Self::render`] would produce, without the allocation when a cheaper
+    /// answer exists - `Text` is measured rather than cloned, for [`RowSet::rendered_byte_len`].
+    /// `Integer`/`Real` still render: a few bytes, cheaper than duplicating `Display`'s counting.
+    pub fn rendered_len(&self) -> usize {
+        match *self {
+            Self::Null => 4,
+            Self::Text(ref v) => v.len(),
+            Self::Integer(_) | Self::Real(_) => self.render().len(),
+        }
+    }
 }
 
 /// A result set: the column labels, and the rows.
@@ -322,6 +333,14 @@ impl RowSet {
             },
             _ => None,
         }
+    }
+
+    /// The total bytes every cell would occupy once rendered (via [`Value::rendered_len`], so a
+    /// wide `Text` cell is counted rather than cloned) - a proxy for the encoded response size, not
+    /// the wire size: the same canonical text an anchor compares against, not the JSON or
+    /// tab-delimited bytes a transport wraps it in. Column labels are not counted.
+    pub fn rendered_byte_len(&self) -> u64 {
+        self.rows.iter().flatten().map(|cell| cell.rendered_len() as u64).sum()
     }
 }
 

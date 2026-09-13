@@ -2579,8 +2579,9 @@ and that is the deliberate choice rather than a leftover: a refusal keeps
 `crate::wire::OutcomeBody::Refusal` with its `outcome` discriminator, and a failure keeps
 `ProblemBody`. `outcome` is the one-field test for which arrived, which matters most exactly
 where a status is shared - `503` is `unavailable` or `at_capacity` from here, and
-`source_unavailable` from there; `413` is a request body over the limit from here, and an answer
-over the row cap from there.
+`source_unavailable` from there; `413` is a request body over the limit from here, and too much
+data to certify an answer from there - the row cap, a data system that will not hand a result
+back in one piece, or this deployment's own ceiling on the bytes a rendered answer may occupy.
 
 **A refusal is not routed through `Failure`, and must not be.** `Failure` is what an `Err`
 becomes, and `ToolOutcome::Refusal` is a domain *result*: a `Failure::Refused` variant would put a
@@ -3375,32 +3376,6 @@ One equality filter.
 
 `ComposeSchema`, `Debug`, `Deserialize<'de>`, `ToSchema`
 
-### `enum MalformedQuestion`
-
-```rust
-pub enum MalformedQuestion
-```
-
-Why a body is not a question.
-
-Every variant names the field, and none of them echoes the caller's value back except where the
-value is the thing that failed to parse as an identifier - which is a bounded character set, not
-free text.
-
-#### Variants
-
-- `Metric`
-- `Grain`
-- `Date`
-- `Range`
-- `Dimension`
-- `FilterDimension`
-- `FilterValue` - The value is not one a catalog could have declared: nothing, more than one line, a control character, an invisible or direction-changing code point, spacing a reader cannot see, or longer than `sutura_domain::catalog::MAX_DIMENSION_VALUE_CHARS`.
-
-#### Implements
-
-`Debug`, `Display`, `Error`
-
 ### `enum OutcomeBody`
 
 ```rust
@@ -3608,3 +3583,12 @@ One dimension of one metric.
 #### Implements
 
 `ComposeSchema`, `Debug`, `Serialize`, `ToSchema`
+
+### `type_alias MalformedQuestion`
+
+Why a body is not a question.
+
+**Owned by `sutura-domain::question`, not by this transport.** HTTP's and MCP's field sets and
+typed refusals were identical - kept equal only by review - so the parse moved inward of both;
+this alias is what every existing reference to `crate::wire::MalformedQuestion` in this crate
+keeps meaning.

@@ -79,6 +79,24 @@ fn rendering_is_one_function_so_an_anchor_compares_the_same_way_everywhere() {
 }
 
 #[test]
+fn rendered_len_agrees_with_render_for_every_variant_without_cloning_text() {
+    // The two must never drift, for every variant - `rendered_byte_len` trusts this without
+    // rendering. `Text` is the one arm that takes the cheap path instead of calling `render`; a
+    // long value proves the two still agree without proving it by allocating twice.
+    for value in [
+        Value::Null,
+        Value::Integer(197_122),
+        Value::Integer(-1),
+        Value::Real(real(0.3_f64)),
+        Value::Text(String::new()),
+        Value::Text(String::from("north")),
+        Value::Text("x".repeat(9_000_000)),
+    ] {
+        assert_eq!(value.rendered_len(), value.render().len(), "{value:?}");
+    }
+}
+
+#[test]
 fn a_cell_cannot_hold_a_number_that_is_not_one() {
     // THE BUG THIS EXISTS FOR. `Real` used to be a raw `f64`, so a ratio measure declaring
     // `zero_denominator: fails` answered the string "inf" under its own certified metric name:
@@ -119,6 +137,23 @@ fn a_cell_cannot_hold_a_number_that_is_not_one() {
         // claim exactly. It also keeps negative zero distinguishable from zero.
         assert_eq!(real(finite).get().to_bits(), finite.to_bits(), "{finite} is a finite number");
     }
+}
+
+#[test]
+fn rendered_byte_len_sums_every_cells_canonical_text_and_not_the_labels() {
+    let rows = RowSet::new(
+        vec![String::from("region"), String::from("revenue")],
+        vec![
+            vec![Value::Text(String::from("north")), Value::Integer(197_122)],
+            vec![Value::Text(String::from("south")), Value::Null],
+        ],
+    )
+    .expect("two well-formed rows");
+    // "north" (5) + "197122" (6) + "south" (5) + "null" (4) - the column labels are not counted.
+    assert_eq!(rows.rendered_byte_len(), 20);
+
+    let empty = RowSet::new(vec![String::from("v")], vec![]).expect("no rows is a result");
+    assert_eq!(empty.rendered_byte_len(), 0);
 }
 
 #[test]
