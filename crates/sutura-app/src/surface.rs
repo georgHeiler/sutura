@@ -8,8 +8,8 @@
 //! handler cannot be generic over the warehouse without the whole router becoming generic in it,
 //! and the generated document becoming generic in it too.
 //!
-//! [`Surface`] is the seam: this crate's two operations, with `W` gone - and with the audit sink's
-//! own parameter gone for the same reason, since [`LocalService`] is generic in that too.
+//! [`Surface`] is the seam: this crate's operations, with `W` gone - and with the audit sink's own
+//! parameter gone for the same reason, since [`LocalService`] is generic in that too.
 //!
 //! # Why it is HERE and not in the transport that uses it
 //!
@@ -35,8 +35,8 @@
 //! crate made the application's interface the property of one of its callers.
 //!
 //! **Is the erasure an application concern or an HTTP one?** The *trigger* is an HTTP fact: a
-//! handler is a concrete function. The *content* is not - `definitions` and `answer` are this
-//! crate's own two operations, and [`LocalService::start`] is [`crate::verify_and_validate`] with
+//! handler is a concrete function. The *content* is not - `definitions`, `answer` and `run_sql` are
+//! this crate's own operations, and [`LocalService::start`] is [`crate::verify_and_validate`] with
 //! the catalog port consumed. Nothing in this file names a framework type, which is checkable
 //! rather than asserted: `cargo xtask check-boundaries` fails on a framework anywhere in a tree it
 //! governs, and this file added no dependency to this crate's manifest. A shape the application can
@@ -131,6 +131,25 @@ pub trait Surface: Send + Sync + 'static {
     /// this slice the deadline is carried through to the port and refused on when already spent, and
     /// nothing yet stops a data system mid-call with it.
     fn answer(&self, context: &RequestContext, query: &Query, deadline: Deadline) -> Result<ToolOutcome, SurfaceFailure>;
+
+    /// Runs one literal statement against this deployment's configured source, or says why it will
+    /// not - the raw SQL tool, `docs/adr/0013`.
+    ///
+    /// Same shape as [`Self::answer`] in every way that matters: a refusal comes back inside the
+    /// `Ok` as [`sutura_domain::raw::RawOutcome::Refusal`], never as an `Err`, and the implementation
+    /// writes one record per outcome before this returns. What differs is the vocabulary - see
+    /// [`sutura_domain::raw`] for why it is not [`ToolOutcome`] wearing a second name.
+    ///
+    /// No `deadline` parameter: `docs/adr/0029`'s threading landed for `answer`/`execute_leg` only in
+    /// the slice that added it, and this tool has no `LIMIT`-bearing plan for it to bound - the row
+    /// cap and the connect-time `statement_timeout` are its only bounds today (`crates/
+    /// sutura-exec-postgres/src/raw.rs`). Threading a deadline through this path too is future work,
+    /// not decided here.
+    fn run_sql(
+        &self,
+        context: &RequestContext,
+        statement: &sutura_domain::raw::RawStatement,
+    ) -> Result<sutura_domain::raw::RawOutcome, SurfaceFailure>;
 }
 
 /// A typed error, owned, with its type erased and its `#[source]` chain intact.
@@ -425,6 +444,34 @@ where
         ));
         Ok(answered.into_outcome())
     }
+
+    fn run_sql(
+        &self,
+        context: &RequestContext,
+        statement: &sutura_domain::raw::RawStatement,
+    ) -> Result<sutura_domain::raw::RawOutcome, SurfaceFailure> {
+        let answered = crate::run_sql(context, statement, &self.broker, &self.warehouses).map_err(|error| match error {
+            crate::RunSqlError::Broker { cause } => SurfaceFailure::Broker { cause: Box::new(cause) },
+            crate::RunSqlError::Credentials { cause } => SurfaceFailure::Miswired { cause: Box::new(cause) },
+            crate::RunSqlError::Posture { cause } => SurfaceFailure::Miswired { cause: Box::new(cause) },
+            // A boot refusal is supposed to make this unreachable in a running deployment - see
+            // `sutura_config`'s own refusal over `DeploymentIdentity` and the adapter's declared
+            // `Warehouse::ACCEPTS_RAW_STATEMENTS`. Reported as a wiring defect rather than panicking,
+            // because a port that CAN return this is a port whose contract says it might.
+            crate::RunSqlError::NoAcceptingSource => SurfaceFailure::Miswired {
+                cause: Box::new(crate::RunSqlError::<B::Error>::NoAcceptingSource),
+            },
+        })?;
+        // Same ordering as `answer`: written before the `Ok`, both outcomes reaching it, so a raw
+        // call is recorded exactly as reliably as a certified one.
+        self.sink.record(&CallRecord::of_raw(
+            context.chain(),
+            statement,
+            answered.outcome(),
+            answered.executed_until(),
+        ));
+        Ok(answered.into_outcome())
+    }
 }
 
 impl<W, S, B> core::fmt::Debug for LocalService<W, S, B> {
@@ -444,9 +491,11 @@ mod tests {
     use sutura_domain::pinned::NotValidated;
     use sutura_domain::query::Query;
 
-    use super::{LocalService, ServiceNotStarted};
-    use crate::tests::{june, metric, shared, source};
-    use crate::tests_support::{AuthoredWarehouse, DiscardingAuditSink, FixedBroker, FixedCatalog, authored_bundle};
+    use super::{LocalService, ServiceNotStarted, Surface as _};
+    use crate::tests::{asked_by_a_person, june, metric, shared, source};
+    use crate::tests_support::{
+        AuthoredWarehouse, DiscardingAuditSink, FixedBroker, FixedCatalog, RawCapableWarehouse, authored_bundle, bundle_over,
+    };
     use crate::{Warehouses, verify_and_validate};
 
     #[test]
@@ -537,5 +586,73 @@ mod tests {
             sutura_semantic::CompileFailure::AuthoredSqlNotPlanned { metric: failed } => assert_eq!(failed, metric()),
             other => panic!("the compiler must name the authored metric rather than substitute a measure: {other:?}"),
         }
+    }
+
+    /// `#666`'s review, finding 3: the constructor `CallRecord::of_raw` was tested directly, but
+    /// nothing reached `LocalService::run_sql`'s own `self.sink.record(...)` call - a mutation that
+    /// builds the record and never sinks it (`crates/sutura-app/src/surface.rs:449-454`) left the
+    /// whole suite green. This calls `run_sql` through the real `Surface` implementation, over a
+    /// sink that only a genuine `record` call can reach.
+    #[test]
+    fn run_sql_writes_one_record_per_outcome_carrying_the_statement_text() {
+        use sutura_domain::audit::{AuditSink, CallRecord, RecordedOutcome};
+        use sutura_domain::raw::RawStatement;
+
+        /// `Send + Sync + 'static`, without `std::sync::Mutex` (`clippy.toml` disallows it) or a
+        /// `tokio` dependency this crate does not have: a channel is `Sync` for a `Send` item and
+        /// needs neither.
+        struct RecordingSink {
+            sender: std::sync::mpsc::Sender<String>,
+        }
+
+        impl AuditSink for RecordingSink {
+            fn record(&self, record: &CallRecord<'_>) {
+                let statement = record.statement().map(|text| text.as_str().to_owned());
+                let line = match *record.outcome() {
+                    RecordedOutcome::RawAnswered { rows, .. } => format!("raw_answered rows={rows} statement={statement:?}"),
+                    RecordedOutcome::RawRefused { reason, .. } => {
+                        format!("raw_refused reason={reason:?} statement={statement:?}")
+                    }
+                    RecordedOutcome::Answered { .. } | RecordedOutcome::Refused { .. } => String::from("certified"),
+                };
+                drop(self.sender.send(line));
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // An empty catalog: no metric, so no anchor `LocalService::start` would re-run against
+        // this fake - `RawCapableWarehouse` answers only the raw path, deliberately, and boot must
+        // not touch the certified one to reach it.
+        let catalog = FixedCatalog::of(bundle_over(&[]));
+        let warehouse = RawCapableWarehouse::answering_rows(source(), shared(), 1);
+        let service = LocalService::start(
+            &catalog,
+            Warehouses::of(warehouse),
+            RecordingSink { sender },
+            FixedBroker::GrantsShared,
+            1 << 30,
+        )
+        .expect("an empty catalog with no anchors boots against any warehouse");
+
+        let context = asked_by_a_person();
+        let answered_statement = RawStatement::parse("select 1").expect("a test statement is a statement");
+        drop(
+            service
+                .run_sql(&context, &answered_statement)
+                .expect("the fake warehouse answers `select 1`"),
+        );
+        let refused_statement = RawStatement::parse("refuse me").expect("a test statement is a statement");
+        drop(
+            service
+                .run_sql(&context, &refused_statement)
+                .expect("a refusal is a result, not an `Err`"),
+        );
+
+        let lines: Vec<String> = receiver.try_iter().collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("raw_answered"), "{lines:?}");
+        assert!(lines[0].contains("select 1"), "{lines:?}");
+        assert!(lines[1].starts_with("raw_refused"), "{lines:?}");
+        assert!(lines[1].contains("refuse me"), "{lines:?}");
     }
 }
