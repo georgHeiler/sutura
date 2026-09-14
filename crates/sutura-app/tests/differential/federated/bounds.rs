@@ -238,7 +238,7 @@ fn execute(case: Case) -> Measurement {
     )
     .map(sutura_app::Answered::into_outcome);
     census.record(&name, &result);
-    let rss = rss_high_water();
+    let rss = rss_high_water().max(baseline_rss);
     let (peak, reserved) = warehouses.each().fold((0, 0), |(peak, reserved), (_, child)| {
         (peak.max(child.pool_peak()), reserved + child.pool_reserved())
     });

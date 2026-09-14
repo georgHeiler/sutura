@@ -34,6 +34,7 @@ impl MeasuredWarehouse {
     pub fn new(source: SourceName, posture: SourcePosture, working_set: WorkingSet) -> Result<Self, DataFusionError> {
         let (environment, pool) = crate::pool::recording_environment(working_set)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .map_err(|cause| DataFusionError::Runtime { cause })?;
         let warehouse =
