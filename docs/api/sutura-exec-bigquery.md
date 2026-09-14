@@ -68,8 +68,9 @@ carried as a `Presented::SubjectToken` and sent as this job's bearer, so the dat
 the statement under whoever that token is. The `wire`'s own credential source stays for the
 shared posture. Per-subject execution still needs a broker that mints a per-leg credential through
 a token exchange - this crate performs no exchange, it presents one - and that broker lives beside
-the composition root that links this adapter, which is the half `docs/implementation-plan-bigquery.md`
-describes as not wired.
+the composition root that links this adapter: `crates/sutura-serve/src/broker.rs` composes
+`sts::WorkloadIdentityBroker` today - wired in serve, not proven live, the same limit
+`docs/adr/0018` states for it.
 
 **ONE of the two subject shapes, and the other is refused rather than degraded.** A
 `Presented::SubjectPrincipal` is a principal the data system switches to on a connection the
@@ -215,6 +216,19 @@ It takes a table name and never a statement, for the same reason `load_fixture` 
 statement is rendered from a name that parsed, and *no arbitrary SQL entry point* stays true.
 
 Behind the same `fixtures` feature and in the same impl block, for `load_fixture`'s reasons.
+
+```rust
+pub const fn dry_run_estimate_agrees_with_its_declaration(estimated_bytes: Option<EstimatedBytes>) -> bool
+```
+
+Whether an accepted pre-flight's own estimate agrees with what `Warehouse::PRICES_DRY_RUN`
+declares.
+
+**The same comparison `sutura_conformance::execute`'s pack makes** over the three adapters
+`execute_packs!` binds - none of which is this one (`telekom/sutura#710`) - named here so it
+can be checked against this adapter's own dry-run path without that binding. A live
+endpoint's own guarantee that it always prices one is still unverified; this only compares
+what an already-answered pre-flight carried against the declaration.
 
 ```rust
 pub fn load_fixture(&self, table: &TableName, csv: &std::path::Path) -> Loaded<<T as >::Error>

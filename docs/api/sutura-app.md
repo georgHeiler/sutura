@@ -275,6 +275,22 @@ Keyed by each adapter's own `Warehouse::source` rather than by a name the caller
 alongside it, so the key and the adapter cannot disagree about which source this is - the same
 reason `PinnedDefinitions::pin` computes its digest from the definitions it stores.
 
+## `use Asked`
+
+Everything one call was established to be: who is asking, and what it may invoke.
+
+**One constructor, `Asked::established`, and it takes the two halves already produced by a
+verification - it performs no verification of its own.** `sutura_http::capability::establish_asked`
+is the one place that calls it today, handing over what leg 1 already derived - a
+`VerifiedCaller`'s chain and scopes, or the deployment's own when there is none. The agent
+surface's own call arrives with PR2 of `telekom/sutura#378`; until then this type adds no third
+way to decide either half.
+
+`Clone` because a transport may need to hand the same value to a blocking-pool closure that
+outlives the request extension it was read from - `sutura_runtime::spawn_carrying_span` is the
+reason `RequestContext` is already `Clone`, and `Permitted` clones a `BTreeSet` of at most three
+elements today.
+
 ## `use Capability`
 
 One thing this surface can be asked to do.
@@ -1636,6 +1652,90 @@ notion of what a scope is.
 
 `Clone`, `Debug`, `Eq`, `PartialEq`
 
+## Module `asked`
+
+Everything one call was established to be, on either transport - one value, not two.
+
+# Why one value rather than two independently-inserted ones
+
+`crate::surface::Surface::answer` needs *who is asking* (`RequestContext`) to reach
+`sutura_domain::identity::CredentialBroker::mint`, and it needs *what this caller may invoke*
+(`Permitted`) to reach the capability gate. Both are established by the same verification, at the
+same instant, from the same header - so a transport that inserted them as two separate values
+would have two places for a request in flight to carry caller A's context beside caller B's
+grant, if the two insertions were ever reordered or one forgotten. One value with one constructor
+makes that pairing a type rather than a convention two call sites happen to keep straight.
+
+# A caller may not state its own identity
+
+No `Deserialize`, for the same reason `sutura_http::inbound::VerifiedCaller` and
+`sutura_domain::identity::RequestContext` have none: there is no code that could turn
+caller-supplied bytes into one of these.
+
+```compile_fail
+// A transport that tried to read one off the wire does not compile.
+let asked: sutura_app::Asked = serde_json::from_str(r#"{"subject":"someone"}"#).expect("no");
+drop(asked);
+```
+
+The compiling twin, so the failure above cannot be passing for a typo - what a caller of
+`Asked::established` can do with one is read the two halves back:
+
+```
+use sutura_app::{Asked, Permitted};
+use sutura_domain::identity::{PrincipalChain, RequestContext, Subject};
+
+let asked = Asked::established(
+    RequestContext::of(PrincipalChain::of(Subject::TheDeploymentItself)),
+    Permitted::every_capability(),
+);
+assert!(asked.permitted().includes(sutura_app::Capability::DescribeCatalog));
+```
+
+### `struct Asked`
+
+```rust
+pub struct Asked
+```
+
+Everything one call was established to be: who is asking, and what it may invoke.
+
+**One constructor, `Asked::established`, and it takes the two halves already produced by a
+verification - it performs no verification of its own.** `sutura_http::capability::establish_asked`
+is the one place that calls it today, handing over what leg 1 already derived - a
+`VerifiedCaller`'s chain and scopes, or the deployment's own when there is none. The agent
+surface's own call arrives with PR2 of `telekom/sutura#378`; until then this type adds no third
+way to decide either half.
+
+`Clone` because a transport may need to hand the same value to a blocking-pool closure that
+outlives the request extension it was read from - `sutura_runtime::spawn_carrying_span` is the
+reason `RequestContext` is already `Clone`, and `Permitted` clones a `BTreeSet` of at most three
+elements today.
+
+#### Methods
+
+```rust
+pub const fn context(&self) -> &RequestContext
+```
+
+Who this call is attributed to, and the credential it presented, if any.
+
+```rust
+pub const fn established(context: RequestContext, permitted: Permitted) -> Self
+```
+
+The only way to one of these: hand over what a transport's own verification already produced.
+
+```rust
+pub const fn permitted(&self) -> &Permitted
+```
+
+What this caller may invoke.
+
+#### Implements
+
+`Clone`, `Debug`
+
 ## Module `preflight`
 
 Asking every open data system whether it holds the tables the bundle names.
@@ -2065,105 +2165,3 @@ pub fn no_budget() -> Self
 
 No ceiling configured. Every question is admitted and nothing is counted - `docs/adr/0030`'s
 "absent means no budget, which is today's behaviour" read back as a constructor.
-
-## Module `raw`
-
-`docs/adr/0013`'s raw SQL tool: the port-facing execution path, split out of `lib.rs` because
-that file hit the thousand-line limit `cargo xtask max-lines` enforces.
-
-One function beside the types it needs: `run_sql` mirrors `crate::answer`'s credential
-handling exactly and differs only on the way out, where every execution failure becomes a
-refusal rather than a `RunSqlError` - see that function's own documentation for why.
-
-### `enum RunSqlError`
-
-```rust
-pub enum RunSqlError<M>
-```
-
-Why running a raw statement did not produce an outcome.
-
-**Deliberately not `ServiceError`.** That type's `Compile` and
-`Federated` arms describe the compiler and the splitter, neither of which this path touches - a
-raw statement is unparsed text, end to end. What is left is the credential half
-`answer` also has, plus one arm of its own for a state the boot refusal is
-supposed to make unreachable: the raw tool turned on over an adapter that does not accept raw
-text at all.
-
-#### Variants
-
-- `Broker` - The credential broker did not answer.
-- `Credentials` - The broker's grant does not fit this request.
-- `Posture` - The presented leg disagrees with how this source was declared.
-- `NoAcceptingSource` - No data system is registered under the raw tool's configured source, or the one registered does not declare `Warehouse::ACCEPTS_RAW_STATEMENTS`.
-
-  **A wiring defect, not a caller-facing refusal.** `sutura_config`'s boot refusal is what is
-  supposed to make this unreachable in a running deployment - the raw tool is refused at
-  startup over an adapter that cannot honour it - so reaching this arm at all means the
-  composition root and the boot check disagreed about what this build links.
-
-#### Implements
-
-`Debug`, `Display`, `Error`
-
-### `struct AnsweredRaw`
-
-```rust
-pub struct AnsweredRaw
-```
-
-One raw call's result: what the caller is told, and what it ran under - the
-`Answered` of the raw path, over `sutura_domain::raw::RawOutcome` rather
-than `ToolOutcome`.
-
-#### Methods
-
-```rust
-pub const fn executed_until(&self) -> Option<Expiry>
-```
-
-```rust
-pub fn into_outcome(self) -> sutura_domain::raw::RawOutcome
-```
-
-```rust
-pub const fn outcome(&self) -> &sutura_domain::raw::RawOutcome
-```
-
-#### Implements
-
-`Debug`
-
-### `fn run_sql`
-
-```rust
-pub fn run_sql<W, B>(context: &sutura_domain::identity::RequestContext, statement: &sutura_domain::raw::RawStatement, broker: &B, warehouses: &crate::warehouses::Warehouses<W>) -> RunningRaw<B>
-```
-
-Runs one literal statement against the deployment's configured source, or says why it will not.
-
-# PR1's scope, stated as a limit rather than left implicit
-
-**This targets the sole registered data system, and refuses `RunSqlError::NoAcceptingSource`
-where more than one is open or none is.** `docs/adr/0013`'s showcase is one Postgres source; a
-deployment naming which of several sources the raw tool may run over is future work, not a
-decision this function makes by omission - a second source is refused rather than guessed at.
-
-# Otherwise, this mirrors `answer`'s credential handling exactly
-
-Mint once, check the grant agrees with the request, check the presented leg agrees with the
-adapter's declared posture - the same three findings behind the same one guard, for the same
-reason: a broker is an adapter outside the hexagon, and its answer is input.
-
-# What is different from `answer` on the way out, and why
-
-**Every failure to execute becomes a refusal, never a `RunSqlError`.** The statement is the
-caller's own text, so a syntax error, a statement timeout, or the server refusing a write inside
-the read-only transaction `docs/adr/0013`'s amendment wraps every call in are all answers *about
-that statement* - not an infrastructure outage this deployment must page for. What remains an
-`Err` is only what happens before the statement ever reaches the data system: the broker not
-answering, or credentials that do not fit.
-
-### `type_alias RunningRaw`
-
-What running a raw statement produced, or why it could not.

@@ -1563,10 +1563,35 @@ one note body is. Per-value caps alone let N conforming values do what one overs
 which is the same argument `crate::knowledge::MAX_KNOWLEDGE_BYTES` makes for notes.
 
 What it does not bound, said plainly. It bounds ONE dimension: nothing here caps how many
-dimensions a metric declares or how many metrics a catalog holds, so the size of the whole
-rendered document is still a function of how much a catalog says. Those are the same shape of hole
-and want the same kind of fix; this is the one the review named, and the honest statement of what
-holds is better than a bound nobody measured.
+dimensions a metric declares or how many metrics a catalog holds. `MAX_DEFINITIONS_BYTES` is
+the fix for that other half.
+
+### `constant MAX_DEFINITIONS_BYTES`
+
+The most bytes a whole `Definitions` may carry of authored content beyond its own identifiers.
+
+Every column a model declares, every required filter and dimension value a metric declares, and
+every model's and metric's description count toward it.
+
+**The count `MAX_VALUES_PER_DIMENSION`'s own note names as missing**: that bound is one
+dimension's, and nothing capped how many dimensions a metric declares, how many required filters
+a metric declares, how many columns a model declares, or how many models and metrics a catalog
+holds. Per-item caps alone let N conforming declarations do what one oversized declaration
+cannot, the same argument `crate::knowledge::MAX_KNOWLEDGE_BYTES` makes for a bundle of notes,
+applied to the catalog that bundle is checked against.
+
+**Measured before it was chosen.** This repository's shipped `single-player` catalog - the larger
+of the two example catalogs - is the reference: its widest model (`subscriptions`) declares 8
+columns, no metric declares more than one required filter, and its columns, required filters and
+dimension values together sum under 1 KiB. Descriptions are the rest of it, at about 18 KiB across
+eleven metrics and four models - each individually inside `MAX_DESCRIPTION_BYTES`, and it is
+their COUNT that was uncapped.
+
+`MAX_DEFINITIONS_BYTES` is 128 KiB: about 6.5 times that reference catalog's ~19 KiB, more
+headroom than `crate::knowledge::MAX_KNOWLEDGE_BYTES`'s five times its own reference, because a
+definitions bundle also carries the identifiers a knowledge bundle does not. Argued the way
+`crate::query::MAX_RANGE_DAYS` is: what it bounds is the size of the document, not whether what
+is in it is worth reading.
 
 ## Module `definitions`
 
@@ -2933,7 +2958,11 @@ shape of the rejected input; the principal itself is personal data and this erro
 
 ### `use PrincipalChain`
 
-Human, then agent, then task - ordered, and with both tail positions absent today.
+Human, then agent, then task - ordered.
+
+The task position is absent today - nothing in this workspace parses one onto a chain yet - but
+the agent position is populated wherever an inbound gate reads an RFC 8693 `act` claim
+(`sutura_http::inbound::token`).
 
 This is what a call is recorded under, and what a budget would be keyed on **if a budget
 existed**. There is no budget port in this workspace; the chain is the key and nothing consumes it
@@ -3232,18 +3261,21 @@ downstream of the render can tell a cut body from a short one. The module docume
 what was measured to choose the numbers.
 
 Newlines and tabs are content here, where `Phrase` refuses them: a body is a markdown block and
-its paragraph breaks are the author's. Other control characters survive parsing and are dropped by
-the renderer, which is the one place that knows what it is rendering into - so the emptiness check
-is made on what the renderer will keep and a body that would draw nothing is refused rather than
-rendered as a heading over blank space.
+its paragraph breaks are the author's. **Every other control character is refused, not
+tolerated** - the emptiness check alone is made on what the renderer will keep, because a body
+made entirely of characters `sutura_app::prompt::quote` drops would render as a heading over
+blank space; one mixed into otherwise ordinary prose passes that check and would render one byte
+shorter than the text under the digest, which is `crate::catalog::Description`'s own argument
+for `first_altered_control` and is not a fact about that
+type alone.
 
-**What does NOT survive parsing is an invisible or direction-changing code point, and unlike a
-`Phrase` a body is not normalised** - it is refused, naming the character. The two types differ
-because what they are is different: a phrase is a key, so two spellings that read as one word have
-to become one value, and a body is prose a person reviewed, so silently editing it would make the
-rendered document differ from the text the definition digest certifies. This is the same argument
-`crate::expression::InvalidFragment::InvisibleCharacter` makes for authored SQL, at the one
-remaining channel that carried reviewed prose into an agent's context verbatim: a body reading
+**What also does not survive parsing is an invisible or direction-changing code point, and unlike
+a `Phrase` a body is not normalised** - it is refused, naming the character. The two types
+differ because what they are is different: a phrase is a key, so two spellings that read as one
+word have to become one value, and a body is prose a person reviewed, so silently editing it would
+make the rendered document differ from the text the definition digest certifies. This is the same
+argument `crate::expression::InvalidFragment::InvisibleCharacter` makes for authored SQL, at the
+one remaining channel that carried reviewed prose into an agent's context verbatim: a body reading
 `status = 'active'` in every terminal and every diff, saying something else, under a digest taken
 over text nobody read - CVE-2021-42574 with the fragment replaced by a paragraph.
 
@@ -3278,6 +3310,15 @@ Why a note body was rejected.
 #### Variants
 
 - `Empty` - Nothing a reader would see. A note with no body is a claim with no reason attached, and the prompt would render a heading over empty space - so this covers whitespace, control characters the renderer drops, and the zero-width code points that draw nothing, as well as the empty string.
+- `ControlCharacter` - A control character other than a newline or a tab, mixed into otherwise ordinary prose.
+
+  **The half `Self::Empty` cannot see.** A body made entirely of these is empty, and is
+  already refused above; one in the middle of a sentence passes that check and renders as a
+  body that is one character shorter than the text under the digest -
+  `crate::catalog::Description`'s own `InvalidDescription::ControlCharacter`'s argument,
+  applied to the second prose type held to the same renderer.
+
+  `InvalidDescription::ControlCharacter`: crate::catalog::InvalidDescription::ControlCharacter
 - `InvisibleCharacter` - One of them, mixed into prose. **Separate from `Self::Empty`, because a body made ENTIRELY of these characters was already refused and a body with one in the middle of a sentence was not** - and the second is the dangerous one: the first renders as a blank heading somebody notices, the second renders as a paragraph that reads correctly and is not what it says.
 
   It is a second refusal beside the emptiness check rather than a widening of it for the reason
@@ -4920,6 +4961,14 @@ available at that boundary.
 - `BundleMissingMetric` - The report names a metric the bundle does not define, so there was nothing to run.
 - `NoGrain` - The metric declares no grain, so no single period - and therefore no single number - is available to compare the declared one against.
 - `NotCompiled` - The anchor's own question would not compile against the bundle that carries it.
+- `ResolvedToTwoSources` - The anchor's own question compiled to two data systems, so nothing here executed it.
+
+  **A5: a defect in this workspace's own wiring, not a compile failure.** An anchor is asked
+  with no dimensions, so it can only ever be one source's own question -
+  `sutura_semantic::plan::federated_plan` is unreachable from a question with no remote
+  dimension. This used to be folded into `NotCompiled` with a fabricated
+  `message` and an empty `chain`, which misreported a plan that compiled fine, to the wrong
+  SHAPE, as one that never compiled at all.
 - `Refused` - The anchor's own question was refused. A governance outcome, surfaced as one: an anchor a caller could not have asked for is not a failure of the data system.
 - `SourceNotConfigured` - The plan names a data system this process did not open. Not prose in a report field: it is the same condition the query path refuses, and it is a misconfigured composition root rather than an outage.
 
@@ -4935,12 +4984,17 @@ available at that boundary.
 - `NotAnAnchor` - The plan the boot path compiled is not this anchor's own, so nothing executed it.
 
   **A defect in the boot path rather than anything about the catalog**, which is why it is one
-  variant with the typed cause flattened into it rather than one per cause: whoever reads a
-  report needs to know this anchor was not checked and why, and every way
-  `sutura_domain::plan::AnchorPlan::of` refuses a plan is "the question compiled here was not the
-  anchor's". Nothing in this workspace can provoke it - it is a SELF-CHECK on the boot path, not
-  a barrier against a caller, and `AnchorPlan`'s own documentation is where that distinction is
-  argued - and a check with no reportable outcome would have to be a panic instead.
+  variant rather than one per cause: whoever reads a report needs to know this anchor was not
+  checked and why, and every way `sutura_domain::plan::AnchorPlan::of` refuses a plan is "the
+  question compiled here was not the anchor's". Nothing in this workspace can provoke it - it
+  is a SELF-CHECK on the boot path, not a barrier against a caller, and `AnchorPlan`'s own
+  documentation is where that distinction is argued - and a check with no reportable outcome
+  would have to be a panic instead.
+
+  **D10: carries `NotAnAnchorsPlan` typed, not flattened.** Unlike `NotCompiled`
+  and `Failed`, this cause is not a cross-crate type the domain must not depend
+  on - `NotAnAnchorsPlan` is this crate's own - so there was never a boundary forcing the
+  flatten this variant used to do anyway.
 - `Failed` - The data system failed the statement. `message` is the adapter's own, `chain` is every cause beneath it - the driver error included, which is the part that names a table, a column or a file and the part a single string used to throw away.
 
 #### Implements
@@ -6014,6 +6068,10 @@ A plan that is not a declared anchor's own, so the boot path did not compile wha
 **An error and not a refusal**: reaching it means the boot path compiled something other than the
 anchor's question, which is a defect here rather than anything about a caller.
 
+`Serialize` for `crate::pinned::NotExecutedReason::NotAnAnchor`'s reason: a boot report
+serializes the whole reason tree, and D10 stopped that variant from flattening this into a
+string first.
+
 #### Variants
 
 - `NotThatMetric` - The plan computes a different metric from the one whose anchor it would be checked against.
@@ -6037,7 +6095,7 @@ anchor's question, which is a defect here rather than anything about a caller.
 
 #### Implements
 
-`Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
+`Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`, `Serialize`
 
 ### `fn plan_measure`
 
@@ -6106,14 +6164,40 @@ fn _checked(filters: Vec<PlanFilter>, params: Vec<ParamValue>) -> Result<PlanBin
 
 One group-by key of the answer: which leg owns it, and the label it carries in that leg's result.
 
+### `use FederatedAnswerRefusal`
+
+A federated answer that could not be computed as asked, classified apart from a wiring defect.
+
+**D19 + A4: every arm here is deterministic.** The same plan against the same data refuses
+again, which is the opposite of what `sutura_app::ServiceError::Federated` used to mean once it
+reached a transport: an HTTP `503`, the status a data system that might come back produces.
+`Self::of` is the total function that decides which arms count - the wiring defects
+(`MissingColumn`, `DuplicateLabels`, `UnsupportedAggregate`, `MalformedRow`,
+`LeafCursorExhausted`) are a defect in this workspace's own splitter, not a caller's, and stay a
+`ServiceError`; `FederatedFailure::ResourcesExhausted` already has its own
+`RefusalReason` variant and is handled before this classification
+runs.
+
+**Carries no cell.** `AmbiguousLink`'s join key and `FloatLinkKey`'s value are exactly the
+caller data this workspace never puts in a message a caller or an agent reads - see
+`FederatedFailure`'s own header for D6, the case that named it. Every arm here is a bare
+discriminant.
+
 ### `use FederatedFailure`
 
 Why a federated answer could not be assembled.
 
 The shape failures are defects in this workspace's own wiring - a leg result missing a column
-`labels` named, or a row narrower than its result's own columns. The `NonFinite`
+`super::labels` named, or a row narrower than its result's own columns. The `NonFinite`
 variant is a `fails` guard meeting a zero denominator, which no divide-tree node can produce a
 value for.
+
+**D6: `AmbiguousLink`'s `Display` does not interpolate `key`.** A join
+key is exactly the kind of cell this workspace treats as caller data - the finding named a case
+where it could be a customer identifier - and `Display` is what every logger and every future
+refusal surface reads. The field stays for equality in tests; nothing here stops a future arm
+from interpolating it instead, which is why this is held by review at any new call site rather
+than by the compiler.
 
 ### `use FederatedPlan`
 
@@ -7045,78 +7129,53 @@ Why a federated plan could not be built.
   Refused before a plan exists rather than when a group is reduced: it is a defect in this
   workspace's own wiring, and reduced, the same plan refused a group holding a value and
   answered `Null` for a group of nulls, under the metric's own certified name.
+- `BucketMismatch` - The bucket handed to this constructor is not the fact leg's own.
+
+  Unreachable through the one production splitter, which builds both from one local value -
+  see `FederatedPlan::new`'s own comment for why this is checked anyway.
+- `TermsDoNotMatchFederation` - The fact leg's terms do not name the labels its federation expects, in order.
+
+  Same reason as `BucketMismatch`: the one production splitter derives
+  both from `labels(&federation)` in one pass.
 
 ##### Implements
 
 `Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
 
-#### `enum FederatedFailure`
+#### `use FederatedAnswerRefusal`
 
-```rust
-pub enum FederatedFailure
-```
+A federated answer that could not be computed as asked, classified apart from a wiring defect.
+
+**D19 + A4: every arm here is deterministic.** The same plan against the same data refuses
+again, which is the opposite of what `sutura_app::ServiceError::Federated` used to mean once it
+reached a transport: an HTTP `503`, the status a data system that might come back produces.
+`Self::of` is the total function that decides which arms count - the wiring defects
+(`MissingColumn`, `DuplicateLabels`, `UnsupportedAggregate`, `MalformedRow`,
+`LeafCursorExhausted`) are a defect in this workspace's own splitter, not a caller's, and stay a
+`ServiceError`; `FederatedFailure::ResourcesExhausted` already has its own
+`RefusalReason` variant and is handled before this classification
+runs.
+
+**Carries no cell.** `AmbiguousLink`'s join key and `FloatLinkKey`'s value are exactly the
+caller data this workspace never puts in a message a caller or an agent reads - see
+`FederatedFailure`'s own header for D6, the case that named it. Every arm here is a bare
+discriminant.
+
+#### `use FederatedFailure`
 
 Why a federated answer could not be assembled.
 
 The shape failures are defects in this workspace's own wiring - a leg result missing a column
-`labels` named, or a row narrower than its result's own columns. The `NonFinite`
+`super::labels` named, or a row narrower than its result's own columns. The `NonFinite`
 variant is a `fails` guard meeting a zero denominator, which no divide-tree node can produce a
 value for.
 
-##### Variants
-
-- `MissingColumn` - A column `combine` reached for by label was absent from a leg's result.
-
-  The labelling contract is one function - the splitter and the combiner both call `labels` -
-  so this is a wiring defect between the two halves rather than a choice either side made.
-- `NonFinite` - A division happened by a zero denominator while the measure declared `fails`.
-
-  On the mono-source path a non-finite cell is refused at the port; this is this slice's port,
-  so the guard landing here is an error naming the metric it could not certify.
-- `DuplicateLabels` - A leg result had two columns under one label, so the combiner could not tell which of them a leaf or key names.
-- `FloatLinkKey` - A link cell carried a floating-point key, which the ADR's float-key rule forbids.
-- `AmbiguousLink` - A link value had more than one lookup row, which would double every measure.
-- `NonNumericLeaf` - A leaf cell that was not a number reached a re-aggregating aggregate.
-
-  The `DuckDB` adapter deliberately returns `DECIMAL` and wide integer columns as
-  `Value::Text` to keep them exact; a sum reaching such a cell cannot certify a number, so
-  it is refused rather than counted as zero.
-- `MixedNumericLeaf` - A leaf column carried two numeric types, so no total or comparison over it is exact.
-
-  A result column in a data system has one logical type. `RowSet` constrains a row's width and
-  nothing about its cells, so a column mixing `Value::Integer` and `Value::Real` cells is
-  representable here, and the two ways to answer one are both wrong numbers: dropping either
-  subtotal loses it outright, and folding the integer one into the real one is an `i64 as f64`
-  widening - the same silent widening `DuckDB`'s own conversion refuses for a 32-bit float and
-  for a wide integer that does not fit an `i64`. Refused instead, which is also what leaves the
-  aggregates above comparing and adding one type.
-- `Overflow` - A leaf total overflowed a 64-bit integer.
-- `UnsupportedAggregate` - An aggregate the combiner does not know how to re-aggregate with.
-
-  The one path `FederatedPlan::new` closes is a carried leaf naming an aggregate
-  `reaggregate::reaggregates` answers `false` for - it refuses such a federation before any
-  leg runs, so no plan that constructor built carries this value. **The limit: nothing else
-  closes it, and construction is not restricted to this module.** `FederatedFailure` is `pub`
-  and re-exported, and the application's federated execution already writes a sibling
-  variant's literal from outside the crate. So any caller can build this value directly; it
-  stays a refusal rather than becoming a panic because a value that claims a re-aggregation
-  which does not exist would answer wrongly, not because the type seals the variant.
-- `ResourcesExhausted` - Materialising the answer crossed the byte budget `docs/adr/0009` applies at the conversion boundary.
-
-  The legs have no row cap - that measured key cardinality rather than bytes, which is exactly
-  what 0009 retired - so this is the bound on the answer `combine` builds. A refusal is honest
-  in the way a truncated one is not: the caller sees a `federation_not_executable`-adjacent
-  refusal rather than a row set that stopped early.
-- `MalformedRow` - A row whose width contradicts the result's own column count.
-
-  Unreachable by construction on both halves: a leg result is built by `RowSet::new`, which
-  refuses a ragged row up front, and the answer is projected from a single fixed key list. It is
-  this slice's defensive arm - the named, reachable-if-the-type-lying shape the old `LegCount`
-  catch-all used to swallow.
-
-##### Implements
-
-`Clone`, `Debug`, `Display`, `Error`, `PartialEq`
+**D6: `AmbiguousLink`'s `Display` does not interpolate `key`.** A join
+key is exactly the kind of cell this workspace treats as caller data - the finding named a case
+where it could be a customer identifier - and `Display` is what every logger and every future
+refusal surface reads. The field stays for equality in tests; nothing here stops a future arm
+from interpolating it instead, which is why this is held by review at any new call site rather
+than by the compiler.
 
 #### `use InternalLabel`
 
@@ -8402,6 +8461,19 @@ somebody else's input.
   rows up through a combiner that would have to guess.
 
   Carries the metric and the aggregate that cannot descend, so a caller sees why.
+- `FederatedAnswerNotWellFormed` - The combiner could not compute the answer as asked, deterministically.
+
+  **D19 + A4: this used to have no refusal at all.** A non-finite ratio and a link value
+  mapping to more than one lookup row left as `ServiceError::Federated` and reached a transport
+  as an HTTP `503` - "worth retrying", the status a data system that might come back
+  produces. Neither is: the same plan against the same rows fails again, so retrying spends a
+  caller's own budget on an answer that was never going to change.
+  `crate::plan::FederatedAnswerRefusal::of` is the total classification that decides
+  which `FederatedFailure` causes land here rather than
+  staying a wiring-defect `ServiceError`.
+
+  Carries the classification and no cell: see `FederatedAnswerRefusal`'s
+  own note on why a join key or a float value never reaches this far.
 - `PlanTablesShareAnIdentifier` - Two tables the plan would read answer to one identifier inside one statement.
 
   **A reproduced wrong-answer report, not a hypothetical.** A fact table at
@@ -8420,10 +8492,12 @@ somebody else's input.
   join is still answered. `sutura_domain::plan::tables` holds the guard and the argument for why
   distinct explicit aliases are not the fix today.
 
-  Carries the identifier the two collapsed to and neither of the two paths. The identifier is
-  the thing a person can act on - it names the join to avoid - and a path carries the project
-  and dataset a deployment reads, which is the operator's business rather than the asker's. The
-  operator-facing detail is on the domain error the plan stage refused with.
+  **D7: carries the identifier and neither of the two paths, and no transport renders the
+  identifier either.** It used to be argued that the bare identifier was safe to show because
+  it names the join to avoid; it still reaches an agent's own context exactly as a schema name
+  in the generated prompt would, which is the rule `sutura_app::prompt` states for that
+  surface, so every transport's message is generic and the identifier stays a typed field for
+  logs and tests.
 - `SourceUnavailable` - The plan named a data system this process did not open.
 
   **What raises it today is a name comparison, not an identity check**, and the doc comment
@@ -9952,6 +10026,14 @@ The two are compared at boot by `SourcePosture::deliverable_by`. Conflating them
 mistake and it gives the mode two owners: an adapter cannot declare a mode it does not own,
 because the same adapter is correct in either posture and only the deployment knows which one it
 is being asked for.
+
+**`Self::posture`'s limit, stated where it publishes rather than on the method alone:** it
+answers the value the root handed over at construction. Every adapter this workspace ships now
+checks a leg's `Presented` credential against it before running - `Presented::agrees_with`,
+called once per leg inside all four adapters' own `execute` - so the comparison is per LEG, not
+only at boot. What that proves is that the credential offered for this leg matches how the
+source was declared, not that the data system itself evaluated anybody's authorization: there is
+no round trip back from the data system confirming which identity it actually ran as.
 
 **An adapter that declares no impersonation capability does not compile:**
 

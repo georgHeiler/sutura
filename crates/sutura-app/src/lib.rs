@@ -89,6 +89,13 @@ pub mod assemble;
 // it. The module's own documentation carries the argument and the limits.
 pub mod capability;
 
+// The one value both transports read: who is asking, and what it may invoke, as the single pair a
+// verification produces. Here rather than in either transport for `capability`'s own reason - the
+// two cannot see each other - applied one step on: this is the PAIRING of that module's `Permitted`
+// with a `RequestContext`, and a pairing owned by one transport is a pairing the other has to reach
+// through it.
+pub mod asked;
+
 // Asking every open data system whether it holds the tables the bundle names, once, for both
 // composition roots that ask it - and comparing the bundle being served against what was actually
 // attached behind it. Here for `warehouses`' reason applied one step on: the DECISION is
@@ -108,6 +115,7 @@ pub mod spend;
 
 mod proof;
 
+pub use crate::asked::Asked;
 pub use crate::capability::{Capability, Permitted};
 pub use crate::proof::{Validated, verify_and_validate};
 use crate::spend::Charge;
@@ -673,7 +681,13 @@ pub(crate) const fn deadline_exceeded(deadline: Deadline) -> RefusalReason {
 }
 
 // `docs/adr/0013`'s raw SQL tool - carved out because this file hit the thousand-line limit.
-pub mod raw;
+//
+// **Private, not `pub`.** `xtask check-boundaries`'s answer-path gate holds `run_sql` at ONE
+// spelling - the re-export below - by guarding it at the crate root only; a `pub mod raw` would
+// give every caller a second, ungated spelling (`sutura_app::raw::run_sql`) the gate's classifier
+// cannot see (`#703` review, finding 1: it compiled clean and the gate printed `ok`). Every item
+// this module needs to expose is re-exported here, so nothing outside this crate loses access.
+mod raw;
 pub use raw::{AnsweredRaw, RunSqlError, RunningRaw, run_sql};
 
 /// Charges `bytes` against `context`'s own subject, and turns a refusal into the domain's own
@@ -793,10 +807,7 @@ where
         // An anchor is asked with no dimensions, so it can only ever be one source. Reaching this
         // arm is a defect here rather than anything about the data.
         Compiled::Federated { .. } => {
-            return not_executed(NotExecutedReason::NotCompiled {
-                message: String::from("an anchor's question resolved to two data systems"),
-                chain: Vec::new(),
-            });
+            return not_executed(NotExecutedReason::ResolvedToTwoSources);
         }
         Compiled::Planned { plan } => plan,
     };
@@ -821,10 +832,10 @@ where
     // for every other anchor in the bundle.
     let anchor_plan = match AnchorPlan::of(&plan, pinned, metric) {
         Ok(anchor_plan) => anchor_plan,
-        Err(cause) => {
-            let (message, chain) = flatten(&cause);
-            return not_executed(NotExecutedReason::NotAnAnchor { message, chain });
-        }
+        // D10: carried typed now - `flatten` used to erase `NotAnAnchorsPlan`'s own variant into a
+        // string, though it is this crate's own type and never needed the boundary that justifies
+        // `flatten` for the other two `NotExecutedReason` arms.
+        Err(cause) => return not_executed(NotExecutedReason::NotAnAnchor { cause }),
     };
     // `verify_anchor` and not `execute`, and the difference is the identity rather than the method
     // name. There is no caller at boot, so there is no credential in scope and nothing here could

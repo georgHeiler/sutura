@@ -3784,6 +3784,7 @@ version = "0.5.1"
 dependencies = [
  "insta",
  "polyglot-sql",
+ "serde_json",
  "serde_norway",
  "sutura-catalog-datahub",
  "sutura-catalog-local",
@@ -3907,6 +3908,7 @@ name = "sutura-exec-bigquery"
 version = "0.5.1"
 dependencies = [
  "base64 0.23.1",
+ "parking_lot",
  "ring",
  "serde",
  "serde_json",
@@ -3926,6 +3928,7 @@ name = "sutura-exec-datafusion"
 version = "0.5.1"
 dependencies = [
  "datafusion",
+ "futures-util",
  "sutura-conformance",
  "sutura-domain",
  "thiserror 2.0.20",
@@ -3956,6 +3959,7 @@ dependencies = [
  "sutura-dev",
  "sutura-domain",
  "sutura-sql",
+ "sutura-tls",
  "thiserror 2.0.20",
  "tokio",
  "tokio-postgres",
@@ -4063,6 +4067,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sutura-domain",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "sutura-tls"
+version = "0.5.1"
+dependencies = [
+ "rcgen",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "thiserror 2.0.20",
 ]
 
