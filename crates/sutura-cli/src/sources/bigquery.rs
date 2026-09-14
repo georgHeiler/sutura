@@ -12,7 +12,7 @@
 #[cfg(feature = "bigquery")]
 use sutura_app::Warehouses;
 #[cfg(feature = "bigquery")]
-use sutura_app::preflight::Verdict;
+use sutura_app::preflight::{Notice, Refusal};
 use sutura_domain::model::SourceName;
 #[cfg(feature = "bigquery")]
 use sutura_domain::pinned::PinnedDefinitions;
@@ -51,8 +51,10 @@ pub(crate) type BigQuerySource = sutura_exec_bigquery::BigQueryWarehouse<
 /// constructors** - which is what issue 121 asks for by "one composition per adapter, shared by both
 /// roots". It is a copy rather than a shared function because the two composition roots are separate
 /// binaries and neither may depend on the other; what is genuinely shared is
-/// `sutura-exec-bigquery`'s own constructors, so a fix to the credential path lands once. The same
-/// argument `crate::sources::refuse_unattached` carries.
+/// `sutura-exec-bigquery`'s own constructors, so a fix to the credential path lands once.
+/// `refuse_unattached` was cited here as carrying the same argument and no longer does: it held no
+/// word an operator reads, so it is shared in `sutura-app` now - this paragraph's counter-example
+/// rather than its precedent.
 ///
 /// # Errors
 ///
@@ -128,25 +130,17 @@ pub(super) fn open(
             ));
         }
     }
-    // `within_request_timeout` and NOT `parse`: an answer makes `QueryDeadline::CALLS_PER_ANSWER`
-    // calls and each pays a connect margin, so the arithmetic lives in the adapter next to the
-    // constant it depends on and a composition root asks for the SHARE. This command has no listener
-    // whose timeout a job could outlive, and it reads `server.request_timeout_seconds` anyway: that
-    // key is the one place a deployment says how long a question may take, and a second number
-    // invented here would be the duplicate that drifts.
-    //
-    // **THE LIMIT, and it is a number rather than a caveat.** `CALLS_PER_ANSWER` is 2 and the connect
-    // margin is 5s, so the shipped default of 30 gives a job **10 seconds**, and
-    // `RequestTimeout::MAX_SECONDS` (300) caps it at **145** - against a `QueryDeadline::MAX_SECONDS`
-    // of six hours. So on THIS binary that key bounds nothing that exists and imposes a ceiling
-    // designed to protect an HTTP connection the command does not have: a twelve-second question is
-    // cancelled by `jobTimeoutMs` with nobody waiting on any request, and no value of the key buys
-    // more than 145 seconds. `QueryDeadline::parse` is the adapter's own door for "a deployment
-    // stating a budget outright" and is deliberately NOT used here, because a second key on this
-    // binary alone is the duplicate this comment's first half refuses. What would change it is a
-    // settings key that means *how long a QUESTION may take* rather than how long a REQUEST may -
-    // one number both roots could read - and that is a settings decision rather than this file's.
-    let deadline = QueryDeadline::within_request_timeout(request_timeout.seconds())
+    // **`parse` and NOT `within_request_timeout` - `docs/adr/0029` retired that arithmetic.** This
+    // command opens the port's own `Deadline` from `settings.server().request_timeout()` at the
+    // instant a question arrives (`commands.rs`), and `BigQueryWire::submit` derives `timeoutMs`/
+    // `jobTimeoutMs` from what THAT says is left - so this `JobBounds` no longer has to already fit
+    // inside the request timeout on its own; it is filled from the key directly. What it still
+    // bounds: the socket ceiling every call is pinned to as a backstop, and the boot path
+    // (`verify_anchor`), which has no `Deadline` to read. This command has no listener whose timeout
+    // a job could outlive, and it reads `server.request_timeout_seconds` anyway because that key is
+    // the one place a deployment says how long a question may take, and a second number invented
+    // here would be the duplicate a prior version of this comment refused for a different reason.
+    let deadline = QueryDeadline::parse(request_timeout.seconds())
         .map_err(|cause| format!("`server.request_timeout_seconds` leaves no BigQuery job deadline: {cause}"))?;
     let ceiling = BytesBilledCeiling::parse(max_bytes_billed)
         .map_err(|cause| format!("`sources.{source}.max_bytes_billed` is not a usable ceiling: {cause}"))?;
@@ -208,7 +202,7 @@ pub(super) fn open(
 /// **Issue 120's asymmetry, at the OTHER serving composition root.** `sutura-serve`'s
 /// `boot::refuse_absent_tables` closed it for the HTTP surface; `sutura mcp` was left with it. The
 /// agent surface serves for as long as its peer keeps the pipe open, and the `BigQuery` arm attaches
-/// nothing - so [`crate::sources::refuse_unattached`] is skipped and, before this, nothing asked the
+/// nothing - so [`sutura_app::preflight::refuse_unattached`] is skipped and, before this, nothing asked the
 /// dataset anything. A mistyped `table:` bought a process that started, announced its capabilities,
 /// and handed an agent a failure the first time it asked that metric.
 ///
@@ -219,13 +213,22 @@ pub(super) fn open(
 /// where the operator learns from whoever asked.
 ///
 /// **The DECISION is `sutura_app::preflight::ask` and is not duplicated**, which is a review
-/// correction to what the first version of this file claimed. It argued a copy on
-/// [`crate::sources::refuse_unattached`]'s precedent - two roots, separate binaries, neither may
-/// depend on the other - and that argument is sound for the operator sentence and reaches no
-/// further: review measured the two helpers underneath as byte-identical (`unmatched`) and identical
-/// modulo signature wrapping (`models_by_table`), and neither holds a word an operator reads.
-/// `sutura-app` is where both roots already get `Warehouses`, so a shared home points inward and
-/// adds no root-to-root edge. What is genuinely this root's is below: the words, and the sink.
+/// correction to what the first version of this file claimed. It argued a copy on the precedent of
+/// a `refuse_unattached` that was itself copied into both roots - two roots, separate binaries,
+/// neither may depend on the other - and review measured the helpers underneath as byte-identical
+/// (`unmatched`) and identical modulo signature wrapping (`models_by_table`), neither holding a
+/// word an operator reads. `sutura-app` is where both roots already get `Warehouses`, so a shared
+/// home points inward and adds no root-to-root edge.
+///
+/// **That precedent is now the opposite of what it was, and the part of the old argument it kept
+/// alive is the part that was wrong.** The sentence was said to be the half a copy is sound for;
+/// [`sutura_app::preflight::refuse_unattached`] is shared today and its operator sentence went with
+/// it, because the sentence was measured byte-identical in the two roots and a sentence both roots
+/// spell the same way is not wording that belongs to a transport. Which of the pre-flight's
+/// outcomes REFUSE moved inward for the same reason, as
+/// `sutura_app::preflight::Verdict::boot_policy`. What is genuinely this root's is below, and it is
+/// what actually DIFFERS from serve's: the words this transport uses - *this process*, not *this
+/// deployment* - and the sink.
 ///
 /// **Three sinks changed relative to `sutura-serve`'s copy, not one**, which is the other half of
 /// that correction. Serve emits `warn!` for the soft outcome and `info!` for the two clean ones; all
@@ -245,7 +248,7 @@ pub(super) fn open(
 /// pre-flight establishes is that a table EXISTS: not that the model's columns are on it, and not
 /// that a question's identity may read it - an anchor is what covers both, for the metrics that have
 /// one. And it reads the bundle loaded FIRST, so a model added to the catalog directory between this
-/// root's two loads is caught on a `files` source by [`crate::sources::refuse_unattached`] and is not
+/// root's two loads is caught on a `files` source by [`sutura_app::preflight::refuse_unattached`] and is not
 /// caught here. That window is open in this root exactly as it is in serve: [`crate::mcp`]'s
 /// `catalog.load()` is load one and this check reads it, `LocalService::start` inside `mcp_service`
 /// loads a second time, and `refuse_unattached` closes the gap for the `Files` arm only. Closing it
@@ -255,14 +258,16 @@ pub(super) fn open(
 ///
 /// # Errors
 ///
-/// A dataset that REFUSED the listing - the identity may not ask - a bundle naming a table the
-/// dataset does not hold, and a dataset whose listing did not account for every table it says it
-/// holds. The third is a refusal that names no `table:` to fix, deliberately: the catalog may be
-/// right and the listing incomplete, which is `telekom/sutura#275`. A dataset that could not be
-/// asked for any other reason is a standard-error line and not a refusal, because a process whose
-/// data system is briefly unreachable at startup still has to be able to serve when it comes back.
-/// `Warehouse::preflight_was_refused` is what splits those two, and the port documents why the split
-/// is the adapter's to make.
+/// Whatever [`sutura_app::preflight::Verdict::boot_policy`] puts on its `Err` side, which is where
+/// that list is kept rather than copied per root - this one had it a refusal short for as long as it
+/// took somebody to count. Two of them read unlike the rest: the unaccounted listing and the
+/// unreadable inventory name no `table:` to fix, deliberately, because the catalog may be right and
+/// the listing incomplete, which is `telekom/sutura#275`.
+///
+/// A dataset that could not be asked for any other reason is a standard-error line and not a
+/// refusal, because a process whose data system is briefly unreachable at startup still has to be
+/// able to serve when it comes back. `Warehouse::preflight_was_refused` is what splits those two,
+/// and the port documents why the split is the adapter's to make.
 #[cfg(feature = "bigquery")]
 pub(crate) fn refuse_absent_tables<W>(pinned: &PinnedDefinitions, engines: &Warehouses<W>) -> Result<(), String>
 where
@@ -289,8 +294,7 @@ where
 ///
 /// # Errors
 ///
-/// [`refuse_absent_tables`]'s three, unchanged: this is the same decision with the printing lifted
-/// out.
+/// [`refuse_absent_tables`]'s, unchanged: this is the same decision with the printing lifted out.
 #[cfg(feature = "bigquery")]
 fn absent_tables_notices<W>(pinned: &PinnedDefinitions, engines: &Warehouses<W>) -> Result<Vec<String>, String>
 where
@@ -303,11 +307,11 @@ where
     let mut notices: Vec<String> = Vec::new();
     for asked in sutura_app::preflight::ask(pinned, engines) {
         let source = asked.source();
-        match asked.into_verdict() {
+        match asked.into_verdict().boot_policy() {
             // An authorization failure is a REFUSAL: the fix is one grant, it will fail identically
             // on every launch, and a soft line is what the person running an agent client never
             // reads.
-            Verdict::Refused { cause } => {
+            Err(Refusal::Refused { cause }) => {
                 return Err(format!(
                     "{source} refused to list the tables the catalog names, so this process cannot \
                      tell a mistyped `table:` from a table that is there. Grant the identity this \
@@ -316,7 +320,7 @@ where
                     render(&cause)
                 ));
             }
-            Verdict::Absent(absent) => {
+            Err(Refusal::Absent(absent)) => {
                 return Err(format!(
                     "{source} does not hold {absent}. Refusing to serve a model whose questions \
                      would fail at query time - fix the catalog's `table:`, or create the table"
@@ -329,7 +333,7 @@ where
             // `sutura-serve`'s reason: the gap BOUNDS how many of these tables it can explain, and
             // the bound runs both ways - a shortfall counts the whole dataset's unaccounted tables
             // and this set is only the part the bundle names, so the clamp is `explained_by`'s.
-            Verdict::Unaccounted { tables, shortfall } => {
+            Err(Refusal::Unaccounted { tables, shortfall }) => {
                 return Err(format!(
                     "{source} did not account for {shortfall} of the table(s) it says it holds, so \
                      at most {explained} of the {count} table(s) the catalog names here may be \
@@ -341,7 +345,7 @@ where
                     count = tables.len()
                 ));
             }
-            Verdict::UnreadableInventory(tables) => {
+            Err(Refusal::UnreadableInventory(tables)) => {
                 return Err(format!(
                     "{source} reported a table count this process could not read and no readable table IDs. \
                      Refusing to serve: presence or absence was not established for {tables}. Check how this \
@@ -351,20 +355,20 @@ where
             // Everything else that failed - an endpoint that did not answer, a dataset that is not
             // there - is the soft outcome, because a process whose data system is briefly
             // unreachable still has to be able to serve when it comes back.
-            Verdict::Unverified { asked: tables, cause } => notices.push(format!(
+            Ok(Notice::Unverified { asked: tables, cause }) => notices.push(format!(
                 "could not verify that {source} holds the {tables} table(s) the catalog names - \
                  serving anyway, so a mistyped table name will fail the first question against it. \
                  The data system said: {}",
                 render(&cause)
             )),
-            Verdict::Present { asked: tables } => {
+            Ok(Notice::Present { asked: tables }) => {
                 notices.push(format!("every one of the {tables} table(s) the catalog names is in {source}"));
             }
             // **`NotReported` gets a line of its own** for the reason `sutura-serve`'s copy does: it
             // is the one outcome meaning *nothing verified this*, and silence makes it
             // indistinguishable from a verified dataset. Unreachable through the `BigQuery` arm,
             // which always asks, and reachable by any future adapter taking the port's default.
-            Verdict::NotReported { asked: tables } => notices.push(format!(
+            Ok(Notice::NotReported { asked: tables }) => notices.push(format!(
                 "{source} does not report which tables it holds, so nothing here verified the \
                  {tables} table(s) the catalog names"
             )),
@@ -509,6 +513,7 @@ mod tests {
         use sutura_domain::pinned::PinnedDefinitions;
         use sutura_domain::plan::{AnchorPlan, Executable};
         use sutura_domain::source::{ImpersonationCapability, SourcePosture};
+        use sutura_domain::warehouse::deadline::Deadline;
         use sutura_domain::warehouse::preflight::{TablesPresent, UnaccountedTables};
         use sutura_domain::warehouse::{AnchorRows, RowSet, Warehouse};
 
@@ -567,7 +572,12 @@ mod tests {
                 &SourcePosture::ImpersonationAtSource
             }
 
-            fn execute(&self, _executable: Executable<'_>, _presented: &Presented) -> Result<RowSet, Self::Error> {
+            fn execute(
+                &self,
+                _executable: Executable<'_>,
+                _presented: &Presented,
+                _deadline: Deadline,
+            ) -> Result<RowSet, Self::Error> {
                 Err(CouldNotAsk)
             }
 

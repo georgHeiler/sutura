@@ -103,8 +103,8 @@ mod tests {
         TableQualifier,
     };
     use sutura_domain::plan::{
-        Executable, PlanBucket, PlanColumn, PlanFilter, PlanKey, PlanMeasure, PlanPredicate, PlanTerm, PredicateOrigin,
-        QueryPlan, ResultLabel, StatementTables,
+        Executable, PlanBindings, PlanBucket, PlanColumn, PlanFilter, PlanKey, PlanMeasure, PlanPredicate, PlanTerm,
+        PredicateOrigin, QueryPlan, ResultLabel, StatementTables,
     };
     use sutura_domain::source::SourcePosture;
     use sutura_domain::warehouse::{ParamValue, RowSet, Value, Warehouse as _};
@@ -114,6 +114,15 @@ mod tests {
     use sutura_exec_bigquery::wire::{CallDeadline, ReasonCode, WireAgent, WireError};
 
     use crate::support::{Connection, Wired, bounds, named, opened, opened_as, presented};
+
+    /// The port's deadline each principal's own call executes under - a generous budget, since
+    /// this leg is about row-level access per principal and not about time.
+    fn deadline() -> sutura_domain::warehouse::deadline::Deadline {
+        sutura_domain::warehouse::deadline::Deadline::opened_at(
+            std::time::Instant::now(),
+            sutura_domain::warehouse::deadline::Budget::parse(std::time::Duration::from_secs(60)).expect("60s"),
+        )
+    }
 
     /// The label the grouping column is projected under.
     ///
@@ -345,23 +354,26 @@ mod tests {
                 },
             },
             ResultLabel::measure(&MetricName::parse(MEASURE_LABEL).expect("a metric name parses")),
-            vec![
-                PlanFilter::new(
-                    PredicateOrigin::Definition,
-                    PlanPredicate::AtOrAfter {
-                        column: column("day"),
-                        param: 0,
-                    },
-                ),
-                PlanFilter::new(
-                    PredicateOrigin::Definition,
-                    PlanPredicate::Before {
-                        column: column("day"),
-                        param: 1,
-                    },
-                ),
-            ],
-            vec![ParamValue::Date(from), ParamValue::Date(until)],
+            PlanBindings::parse(
+                vec![
+                    PlanFilter::new(
+                        PredicateOrigin::Definition,
+                        PlanPredicate::AtOrAfter {
+                            column: column("day"),
+                            param: 0,
+                        },
+                    ),
+                    PlanFilter::new(
+                        PredicateOrigin::Definition,
+                        PlanPredicate::Before {
+                            column: column("day"),
+                            param: 1,
+                        },
+                    ),
+                ],
+                vec![ParamValue::Date(from), ParamValue::Date(until)],
+            )
+            .expect("a fixture plan binds its two range bounds in placeholder order"),
             TimeRange::new(from, until).expect("a bounded range is a range"),
         )
     }
@@ -418,10 +430,10 @@ mod tests {
         // resemble each other - which is what makes a difference in the rows a difference in the
         // identity.
         let as_a = warehouse
-            .execute(Executable::Query(&plan), &principals.a.presented())
+            .execute(Executable::Query(&plan), &principals.a.presented(), deadline())
             .expect("the endpoint answered under principal A's own bearer");
         let as_b = warehouse
-            .execute(Executable::Query(&plan), &principals.b.presented())
+            .execute(Executable::Query(&plan), &principals.b.presented(), deadline())
             .expect("the endpoint answered under principal B's own bearer");
 
         let a_saw = grants_in("principal A", &as_a);
@@ -475,7 +487,7 @@ mod tests {
         let principals = fixture.principals;
         let warehouse = opened(source(), fixture.connection, bounds());
 
-        let refused = match warehouse.execute(Executable::Query(&plan), &presented()) {
+        let refused = match warehouse.execute(Executable::Query(&plan), &presented(), deadline()) {
             Ok(rows) => {
                 let saw = grants_in("the deployment's own identity", &rows);
                 println!(

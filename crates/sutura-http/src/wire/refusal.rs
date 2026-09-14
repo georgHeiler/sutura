@@ -9,9 +9,13 @@
 //! exactly the behaviour a refusal exists to prevent. The invariant is real and is untouched here.
 //! The status conclusion drawn from it was wrong twice over.
 //!
-//! **The retry premise does not hold.** Nothing mainstream retries a `4xx` by default; the statuses
-//! retried by convention are `429` and `408`, and no refusal maps to either. Checked against the
-//! current documentation rather than asserted:
+//! **The retry premise does not hold in general, and one refusal is now the documented exception.**
+//! Nothing mainstream retries a `4xx` by default; the statuses retried by convention are `429` and
+//! `408`. At the time this module was written no refusal mapped to either - **`docs/adr/0030`
+//! amends that**: `RefusalReason::BudgetExhausted` is `429`, precisely because it is the one refusal
+//! here that self-heals - the same question, asked again after the window this replica tracks
+//! resets, is a different answer, which is what a `429`'s retry convention states and no other
+//! variant here can. Checked against the current documentation rather than asserted:
 //!
 //! * `urllib3.util.Retry` - what `requests` mounts through its `HTTPAdapter` - drives status-based
 //!   retries from `status_forcelist`, "a set of integer HTTP status codes that we should force a
@@ -26,8 +30,8 @@
 //!   DELETE)."
 //!
 //! Go's `net/http` reference documents no status-driven retry anywhere in `Client`, `Transport` or
-//! `RoundTripper`. And `422`, which five refusals below map to, is documented the other way round
-//! from the premise: "Clients that receive a `422` response should expect that repeating the request
+//! `RoundTripper`. 6 refusal reasons land on `422` below, documented the other way round from the
+//! premise: "Clients that receive a `422` response should expect that repeating the request
 //! without modification will fail with the same error."
 //!
 //! **And the `200` cost something the argument never priced.** A governance refusal that comes back
@@ -311,6 +315,51 @@ pub(crate) fn refused(reason: &RefusalReason) -> (StatusCode, RefusalBody) {
                 postures.iter().copied().collect::<Vec<&str>>().join(" and ")
             ),
         ),
+        // 422, for `ResourcesExhausted`'s exact reason: this used to be a data-system failure and
+        // leave as a retryable `503`, and a deadline is a configured bound the deployment decided
+        // and the data system enforced - something WAS judged. Retrying spends the whole budget at
+        // the data system again, and on a networked adapter bills again; 422's own definition -
+        // "repeating the request without modification will fail with the same error" - is what is
+        // true here, load permitting. `docs/adr/0029` argues both directions once.
+        //
+        // The sentence names the configured budget and nothing about how long the question would
+        // have taken, which nobody knows, and nothing about which leg spent it if this was a
+        // federated answer - see the domain variant for why.
+        RefusalReason::DeadlineExceeded { budget_seconds } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "this deployment stopped the question after {budget_seconds} seconds, its configured \
+                 budget for one answer; narrow the period, group by fewer dimensions or add a filter \
+                 and ask again. Retrying it unchanged returns this same refusal"
+            ),
+        ),
+        // 429, and `docs/adr/0030` argues why this is the first refusal on this surface where that
+        // status is honest rather than borrowed: every other refusal is permanent - the same
+        // question refused now is refused again on an identical retry - and this one is not. The
+        // same question, asked again once this replica's window resets, is answered.
+        //
+        // Not 422 (`ResourcesExhausted`, `DeadlineExceeded`): their own rule is "narrowing helps and
+        // repeating does not", and narrowing a question that already fits the metric and the range
+        // does not raise its own price. Not 403 (`CredentialUnavailable`, `SourceRefused`): those
+        // grants do not reappear on a timer, and sharing their status would teach a caller that a
+        // `403` from this service sometimes means "come back later" - spending the meaning those two
+        // rows exist to keep.
+        //
+        // The sentence names the ceiling's own reset, in seconds - the same number `Retry-After`
+        // carries, computed once and read by both (see `crate::wire::refusal::retry_after`) - and
+        // nothing about how much was asked for: the ceiling is about spend already made, not this
+        // question's shape, so no number here would tell a caller anything to narrow.
+        RefusalReason::BudgetExhausted { reset_after_seconds } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "this replica's per-subject spend ceiling is exhausted for the current window; \
+                 asking again now returns this same refusal. It resets in {reset_after_seconds} \
+                 seconds, after which the same question is usually answered rather than refused - \
+                 unless this question's own estimate is itself over the ceiling, in which case it \
+                 is refused every window and narrowing it is the only remedy, because the ceiling \
+                 is otherwise about spend already made rather than about this question's shape"
+            ),
+        ),
     };
     (
         status,
@@ -320,6 +369,39 @@ pub(crate) fn refused(reason: &RefusalReason) -> (StatusCode, RefusalBody) {
             detail,
         },
     )
+}
+
+/// How long until a refusal's own window makes the same question answerable again, where that is a
+/// fact this replica can name rather than a guess.
+///
+/// **[`RefusalReason::BudgetExhausted`] only**, for the reason `crate::problem::Failure::retry_after`
+/// already states for its own one case: a number invented for this header is a promise, and nothing
+/// else on this surface knows when its own answer changes. Read by [`crate::wire::Outcome`], which is
+/// the one place a header is attached to a refusal.
+pub(crate) const fn retry_after(reason: &RefusalReason) -> Option<u64> {
+    match *reason {
+        RefusalReason::BudgetExhausted { reset_after_seconds } => Some(reset_after_seconds),
+        RefusalReason::MetricUnknown { .. }
+        | RefusalReason::GrainNotSupported { .. }
+        | RefusalReason::DimensionNotPermitted { .. }
+        | RefusalReason::DimensionNotFilterable { .. }
+        | RefusalReason::DimensionValueNotAllowed { .. }
+        | RefusalReason::DuplicateDimension { .. }
+        | RefusalReason::TooManyDimensions { .. }
+        | RefusalReason::ResultTooLarge { .. }
+        | RefusalReason::TimeRangeTooLong { .. }
+        | RefusalReason::PlanSpansTooManySources { .. }
+        | RefusalReason::FederationNotExecutable
+        | RefusalReason::FederationLinkAmbiguous { .. }
+        | RefusalReason::MeasureDoesNotFederate { .. }
+        | RefusalReason::PlanTablesShareAnIdentifier { .. }
+        | RefusalReason::SourceUnavailable { .. }
+        | RefusalReason::ResourcesExhausted { .. }
+        | RefusalReason::CredentialUnavailable { .. }
+        | RefusalReason::SourceRefused { .. }
+        | RefusalReason::LegsDecideIdentityDifferently { .. }
+        | RefusalReason::DeadlineExceeded { .. } => None,
+    }
 }
 
 /// The sentence for a result that was too much data, per bound.
@@ -346,6 +428,13 @@ fn too_much_data(bound: ResultBound) -> String {
              it is, so narrow the period or group by fewer dimensions and ask again. Retrying it \
              unchanged returns this same refusal",
         ),
+        // A figure again, and this one IS this deployment's own: unlike the row cap it is not a
+        // count a caller can subtract dimensions from directly, so the sentence names the ceiling
+        // rather than a number of rows or dimensions to remove.
+        ResultBound::Encoded { limit_bytes } => format!(
+            "the answer would occupy more than {limit_bytes} bytes once rendered and was NOT \
+             truncated to fit; narrow the period or group by fewer dimensions and ask again"
+        ),
     }
 }
 
@@ -355,7 +444,7 @@ mod tests {
     use sutura_domain::model::{DimensionName, Grain, MetricName, SourceName, TableName};
     use sutura_domain::query::{RefusalReason, ResultBound};
 
-    use super::refused;
+    use super::{refused, retry_after};
 
     fn metric() -> MetricName {
         MetricName::parse("revenue").expect("a test metric is a metric")
@@ -504,6 +593,16 @@ mod tests {
                 StatusCode::CONFLICT,
                 "legs_decide_identity_differently",
             ),
+            (
+                RefusalReason::DeadlineExceeded { budget_seconds: 29 },
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "deadline_exceeded",
+            ),
+            (
+                RefusalReason::BudgetExhausted { reset_after_seconds: 41 },
+                StatusCode::TOO_MANY_REQUESTS,
+                "budget_exhausted",
+            ),
         ]
     }
 
@@ -541,12 +640,17 @@ mod tests {
 
     #[test]
     fn every_refusal_has_a_distinct_code() {
-        // The status is shared on purpose - five variants are `422` - so the code is what a client
-        // has to be able to branch on, and two variants sharing one would make that impossible.
-        // THE NUMBER HERE IS PROSE, held by review and by nothing else. It said four while the
-        // table below mapped five and every gate stayed green - `github.com/telekom/sutura#603`.
-        // A test pinning it to `every_reason` was written and then removed: it passed against base
-        // as well, and `just causality` refuses a test that cannot go red.
+        // The status is shared on purpose - 6 refusal reasons land on `422` - so the code is what
+        // a client has to be able to branch on, and two variants sharing one would make that
+        // impossible. THE NUMBER HERE IS PROSE: it said four while `docs/serving.md` mapped five,
+        // then five while this file gained a sixth arm, and every OTHER gate stayed green both
+        // times - `github.com/telekom/sutura#603`, `#670`, `#676`. `COUNTS`
+        // (`xtask/src/guidance/claims/counts.rs`) now derives this number from the arms above and
+        // refuses `check-guidance` if this comment, this file's own module header, `docs/serving.md`'s
+        // or `routes/v1/query.rs`'s says anything else - the limit being that it holds only every
+        // registered site, not every mention anywhere. A test pinning it to
+        // `every_reason` was written and then removed: it passed against base as well, and `just
+        // causality` refuses a test that cannot go red.
         let mut codes: Vec<&str> = every_reason().into_iter().map(|(_, _, code)| code).collect();
         let count = codes.len();
         codes.sort_unstable();
@@ -565,6 +669,25 @@ mod tests {
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         let detail = body.detail();
         assert!(detail.contains("10000"), "the sentence does not name the cap: {detail}");
+        assert!(detail.contains("NOT truncated"), "{detail}");
+        assert!(detail.contains("narrow"), "{detail}");
+    }
+
+    #[test]
+    fn the_encoded_bound_refusal_names_the_ceiling_and_not_a_row_count() {
+        // The third arm: a result inside the row cap and inside every data system's own reply cap
+        // can still cost more to encode than this deployment will spend, because the row cap counts
+        // rows and this ceiling is bytes. The sentence has to name the ceiling this deployment
+        // measured, at the same status and code the other two bounds use.
+        let (status, body) = refused(&RefusalReason::ResultTooLarge {
+            bound: ResultBound::Encoded {
+                limit_bytes: 8 * 1024 * 1024,
+            },
+        });
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body.code(), "result_too_large");
+        let detail = body.detail();
+        assert!(detail.contains("8388608"), "the sentence does not name the ceiling: {detail}");
         assert!(detail.contains("NOT truncated"), "{detail}");
         assert!(detail.contains("narrow"), "{detail}");
     }
@@ -623,6 +746,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_deadline_names_its_budget_in_the_sentence() {
+        // `docs/adr/0029`'s own claim for this wire: "the sentence names the configured budget in
+        // seconds". `RefusalBody` is `{code, status, detail}`, so the sentence is the ONLY place
+        // `budget_seconds` reaches this wire at all - the sibling of
+        // `exhaustion_is_not_the_status_a_dead_data_system_comes_back_as`'s ceiling assertion.
+        let (status, body) = refused(&RefusalReason::DeadlineExceeded { budget_seconds: 29 });
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body.code(), "deadline_exceeded");
+        let detail = body.detail();
+        assert!(
+            detail.contains("29 seconds"),
+            "the sentence does not name the budget: {detail}"
+        );
+    }
+
+    #[test]
     fn a_missing_credential_at_a_source_is_not_a_request_to_authenticate_again() {
         // `docs/adr/0005` says the 403s on this surface are not a statement about a credential, and
         // this variant is the one that makes that stop being true - so the sentence has one job
@@ -659,5 +798,37 @@ mod tests {
         let rendered = serde_json::to_string(&body).expect("the refusal serializes");
         assert!(rendered.contains("region"), "{rendered}");
         assert!(!rendered.contains("north"), "{rendered}");
+    }
+
+    #[test]
+    fn a_spent_budget_is_429_and_names_its_own_reset() {
+        // `docs/adr/0030`'s own claim: the first refusal on this surface that self-heals, so the one
+        // status here borrowed from the retry-by-convention pair rather than the permanent 4xx family
+        // every other refusal uses.
+        let (status, body) = refused(&RefusalReason::BudgetExhausted { reset_after_seconds: 41 });
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.code(), "budget_exhausted");
+        let detail = body.detail();
+        assert!(
+            detail.contains("41 seconds"),
+            "the sentence does not name the reset: {detail}"
+        );
+    }
+
+    #[test]
+    fn only_a_spent_budget_carries_a_retry_after() {
+        // The header this surface used to carry for NO refusal at all - see `crate::wire::Outcome`'s
+        // own doc comment - now carries one, and only one: a guessed number for any other refusal
+        // would be a promise this deployment cannot keep.
+        assert_eq!(
+            retry_after(&RefusalReason::BudgetExhausted { reset_after_seconds: 41 }),
+            Some(41)
+        );
+        for (reason, ..) in every_reason() {
+            if matches!(reason, RefusalReason::BudgetExhausted { .. }) {
+                continue;
+            }
+            assert_eq!(retry_after(&reason), None, "{reason:?} must not invent a Retry-After");
+        }
     }
 }

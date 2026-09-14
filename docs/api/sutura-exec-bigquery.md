@@ -114,17 +114,72 @@ an owned `#[source]`.
 - `Endpoint` - The endpoint did not answer.
 - `Render` - The plan would not render.
 - `LegWithoutCombiner` - A federated leg arrived, and there is nothing above it to combine legs.
+
+  **A refusal to execute rather than an execution**, worded as `sutura-exec-duckdb` words it: a
+  leg run with nothing above it returns rows at a finer grouping than the question asked for,
+  which is a wrong number under a certified name.
 - `NoPrincipalSwitch` - The leg presents a principal for the data system to switch to, and there is no such mechanism here.
+
+  **The narrow half of a refusal that used to be wholesale, and it has to stay refused.** This
+  adapter declares `PerSubjectCredential` and delivers exactly one of the two subject shapes: a
+  `SubjectToken` rides as this job's bearer, so the
+  dataset evaluates the statement under whoever the token is. `BigQuery` has no proxy-user or
+  `SET ROLE` equivalent for a `SubjectPrincipal`,
+  so a leg carrying one has no material to send - and
+  `agrees_with` passes it, because the two shapes are
+  the same POSTURE. Accepting
+  it would submit the job under the credential the transport already holds while provenance,
+  read off this source's posture, reported the answer as impersonated: every row as the
+  process, recorded as the asker.
 - `PresentedDisagreesWithPosture` - The leg's credential and this source's declared posture do not agree.
 - `UnmappedType` - A column came back as a type this adapter does not map.
+
+  It NAMES the type rather than answering null, which is the whole reason
+  `FieldType::Unmapped` carries the endpoint's own
+  spelling.
 - `NotAnInteger` - A cell declared `INT64` did not parse as one.
+
+  **Two variants rather than one carrying a `&'static str`, because the CAUSE differs.** The
+  endpoint sends every value as text, so "declared an integer" and "parses as an integer" are
+  two facts, and the standard-library error that says why is worth keeping on the chain.
 - `NotADouble` - A cell declared `FLOAT64` did not parse as one.
 - `NotABool` - A cell declared `BOOL` was neither `true` nor `false`.
+
+  No `#[source]`: there is no parse behind it, because the check is a comparison against the two
+  spellings the endpoint documents. A variant with an invented cause would be worse than none.
 - `NotFinite` - A double came back non-finite.
+
+  **What this arm actually guards, on THIS target, is narrower than the two SQL adapters
+  agreeing.** In `GoogleSQL` the `/` operator raises on a zero divisor for every numeric type -
+  only `IEEE_DIVIDE` answers `inf`/`NaN` - so an unguarded zero-division ratio fails at the
+  service first, as `Self::Endpoint` with the same `503` as a dead data system. What reaches
+  this arm is a non-finite value STORED in a `FLOAT64` column, and the check keeps that stored
+  `Infinity` from answering a real under a certified metric name. It is `sutura-exec-duckdb`'s
+  same arm that gives `zero_denominator: fails` its meaning, because there the unguarded `/`
+  does answer `inf`; the sentence that credits this arm with the ratio case belongs to `DuckDB`.
 - `NotADate` - A cell declared as a date did not parse as one.
 - `RowWidth` - A row had more or fewer cells than the schema had columns.
+
+  Distinct from `Self::Shape`: this one is the ENDPOINT disagreeing with itself, caught before
+  a row is built, so the position of the offending row is reportable.
 - `Incomplete` - The endpoint delivered a page whose row count is not what it reported as total.
+
+  `jobs.query` answers one page at a time, and completeness is stated as `totalRows` beside the
+  rows - never by the rows alone. A first page, or an incomplete job's empty `rows`, would read
+  to `answer()` as *under the cap, not truncated*: a wrong number under a certified name, through
+  the exact row the row-cap invariant exists to hold. So a delivered count that does not equal the
+  reported total is refused here, at the seam, rather than certified.
 - `NoIdentityInTheAnswer` - The identity read came back as something other than one row of one text cell.
+
+  Its own variant rather than `Self::RowWidth` or `Self::Shape`, because what a caller does
+  about it is different: those two are a result set this adapter could not map, and this is
+  *the endpoint did not tell us who ran the job* - which for the one caller that asks
+  (`BigQueryWarehouse::session_user`) is the whole
+  answer rather than a cell of it.
+
+  **It carries the SHAPE and never the value**, deliberately. The one thing this answer can
+  contain is an account identifier, and the venue that reads it writes to a public log - so a
+  refusal that quoted what came back would be the disclosure the read exists to check for.
 - `Shape` - The result set could not be built.
 
 ### Implements
@@ -385,6 +440,29 @@ parameter, with nothing in the domain to invent it from.
 
 `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`
 
+### `enum JobDeadline`
+
+```rust
+pub enum JobDeadline
+```
+
+Which clock one job answers to: the port's own `Deadline`, or the boot path's fresh window.
+
+**A two-variant type rather than `Option<Deadline>`, so the boot arm cannot be spelled by
+accident.** `None` reads the same whether it means *forgot to pass the deadline* or *this is
+deliberately the boot path* - indistinguishable at a call site and in review. `Boot` is a name a
+reader has to notice, and an `execute` or `dry_run` call site that wrote it instead of `Port(..)`
+reads as exactly the regression it would be.
+
+#### Variants
+
+- `Port` - A request-time call's own `Deadline`, opened by the transport at the answer's arrival. `Warehouse::dry_run`/`execute` build this arm, and only this arm - see `JobRequest::new`'s own doc.
+- `Boot` - The boot path: no caller, no request timeout. `verify_anchor`, a fixture load or drop, and the identity read build this arm; `crate::wire::BigQueryWire::submit` opens a fresh window from this transport's own configured `crate::wire::JobBounds` instead.
+
+#### Implements
+
+`Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`
+
 ### `struct JobRequest`
 
 ```rust
@@ -403,6 +481,13 @@ pub const fn billing_project(&self) -> &ProjectId
 ```
 
 The project this job is billed to.
+
+```rust
+pub const fn deadline(&self) -> JobDeadline
+```
+
+Which clock this call answers to. See `JobDeadline` and the constructor's own doc for what
+each arm means to `crate::wire::BigQueryWire::submit`.
 
 ```rust
 pub const fn default_dataset(&self) -> &DatasetId
@@ -682,9 +767,45 @@ preflight decides whether it leaves a requested table unaccounted for and refuse
 #### Variants
 
 - `Unreported` - The document carried no total at all, so an empty listing and an empty dataset are one value.
+
+  **Where every boot stood before the field was decoded**, and where one stands again the day
+  the service stops sending it - which is why this is a variant rather than a zero.
 - `Unreadable` - It carried a total this crate could not read as a count.
+
+  Distinct from `Self::Unreported` on purpose: *the service said nothing* and *the service
+  said something this crate did not understand* are different findings, and the second is
+  itself a shape change worth being able to see. Nothing of the value is kept - a foreign
+  scalar is not something this crate carries around to print.
+
+  Beside zero readable IDs, preflight returns a count-free unreadable-inventory refusal.
+  A readable ID rejected by `usable_table_id` still counts, so a legitimately dropped name
+  cannot be mistaken for an inventory from which no ID was readable.
 - `Accounted` - It reported a total, and carried a readable table id for every table the total claims.
+
+  *At least* every one: `reported` may be below the number of ids the document carried without
+  anything being wrong, because a total read off a dataset being written to is a moving number.
 - `Short` - It reported MORE tables than the same document carried readable table ids for.
+
+  **On a document that carried no readable id at all this is the shape change** - a dataset
+  that answered with tables the listing did not name, or with entries this crate could read no
+  id out of - which is exactly what an empty `tables` array cannot be told from an empty
+  dataset without. Where `Shortfall::identified` is non-zero it is weaker: a table created
+  between the total and the array, or a page contract this transport read differently than the
+  service meant it.
+
+  **What it does not separate, so a decision does not read it as more:** an identified count
+  of zero merges *the array was empty* with *no entry carried a readable id*, because the raw
+  entry count is not kept. Both are the same finding for the caller that has one - no ids
+  beside a non-zero total - so nothing needs the third number today, and a decision that wants
+  to tell those two apart has to add it rather than read this one harder.
+
+  What a pre-flight produces from this reading is
+  `TablesPresent::Unaccounted` rather than an absence: a table the bundle names that this
+  listing did not name may be sitting in the gap, so a boot refuses without saying the catalog
+  is wrong. A VALUE and not an `Err`, because `preflight_was_refused` puts everything that is
+  not a `401`/`403` in the warning half. `docs/adr/0018` carries the argument and
+  `telekom/sutura#275` is where it was taken. `Self::Unreadable` can also refuse, but has no
+  shortfall and does so only beside zero readable IDs. The other readings retain ordinary absence.
 
 #### Implements
 
@@ -800,6 +921,9 @@ Why a resource name this adapter was handed is not usable.
 
 - `Empty` - Nothing was written, or only whitespace was.
 - `Character` - A character that could leave the part of a request this value is written into.
+
+  **The position is carried and the value is not.** A project id is one of the things this
+  repository does not print, so a refusal says where the problem is rather than quoting it.
 
 #### Implements
 
@@ -970,6 +1094,18 @@ cheap enough for a boot check; and `apply`, behind the `fixtures` feature, is th
 statement-issuing method - present only in a build that loads fixtures, so no deployment can
 reach it.
 
+### `type_alias DryRunEstimate`
+
+A dry run's own byte estimate, when it priced one - `None` is `docs/adr/0030`'s honest absence,
+never a defaulted zero.
+
+**A named alias rather than `Option<EstimatedBytes>` written out at every return type**, because
+this exact shape - wrapped in a `Result` - is the return type of `JobTransport::validate` and
+every one of its implementors, fake and real; a name spares each of those sites the `Option` and
+says what the value MEANS at the read site, which the bare composed type would not. It does not
+cross this workspace's `clippy::type-complexity` threshold - it is well under it - so the alias
+earns its place on readability alone, not on a lint that does not fire either way.
+
 ## Module `wire`
 
 The WIRE: one `JobTransport` that speaks to a `BigQuery` endpoint over HTTP.
@@ -1007,24 +1143,30 @@ said it linked none, which `docs/adr/0017`'s second amendment had already spent.
 
 - **A job is bounded in TIME and in MONEY, and neither bound is a constant here.** `JobBounds`
   carries both, `WireAgent` carries the `JobBounds`, and `BigQueryWire` can only be built from
-  a `WireAgent` - so there is no way to submit a job this deployment did not bound. `jobTimeoutMs`
-  is what cancels a job at the service (`timeoutMs` alone does NOT: it bounds how long the client
-  waits, and an expired one leaves the job running and billing), and `maximumBytesBilled` is what
-  stops a question scanning a petabyte - neither the row cap nor the one-page refusal bounds bytes
-  scanned.
-- **The time bound is ONE ABSOLUTE DEADLINE PER CALL, not a timeout per HTTP operation, and this
-  bullet exists because the earlier shape was the second thing while claiming the first.** A single
-  call does a token exchange and then a job; `timeout_global` on the agent gave each of them a full
-  budget of its own, so a review measured one ANSWER - `dry_run` then `execute`, two exchanges and
-  two jobs - at four independent budgets against a transport whose own request timeout is thirty
-  seconds. `CallDeadline` is opened once in `submit` and every operation below it gets only what
-  is LEFT: the exchange's socket, the job's socket, and the `timeoutMs`/`jobTimeoutMs` the request
-  carries. A budget spent before the job is `WireError::DeadlineSpent` rather than a send.
-  **The limit, because it is the half a type here cannot reach:** neither `Warehouse` nor
-  `JobTransport` takes a deadline, so the two calls one answer makes cannot share one - an
-  answer's worst case is `QueryDeadline::CALLS_PER_ANSWER` budgets. That arithmetic is done once,
-  in `QueryDeadline::within_request_timeout`, so a composition root gets a deadline that already
-  fits inside the request timeout instead of a number it has to divide correctly.
+  a `WireAgent`. `jobTimeoutMs` is what cancels a job (`timeoutMs` alone does NOT: it bounds the
+  client's own wait, and an expired one leaves the job running and billing); `maximumBytesBilled`
+  stops a question scanning a petabyte, which neither the row cap nor the one-page refusal does.
+- **The time bound is ONE ABSOLUTE DEADLINE PER ANSWER, opened by the port and not by this
+  adapter, and this bullet exists because the earlier two shapes were each the second thing while
+  claiming the first.** `timeout_global` on the agent once gave every HTTP operation a full budget
+  of its own, so a review measured one ANSWER at four independent budgets against a transport
+  whose own request timeout is thirty seconds. `CallDeadline`, opened once per CALL, fixed that
+  leak - and then could not fix the next one, because neither `Warehouse` nor `JobTransport`
+  took a deadline, so the two calls one answer makes still could not share one; a composition
+  root's own configured job bounds substituted an arithmetic that divided the request timeout by
+  how many calls one answer makes, checked by nothing outside this crate. **`docs/adr/0029` now
+  carries a `Deadline` across the port itself** - one absolute instant,
+  opened by the transport at the answer's arrival and shared by every leg. `submit` reads what it
+  says is left via `crate::transport::JobRequest::deadline` and opens a `CallDeadline` FROM
+  that via `CallDeadline::opened_at_for`, so a slow token exchange shortens the job that
+  follows it rather than being followed by one with a full budget of its own, and `timeoutMs`/
+  `jobTimeoutMs` are what is left of THAT rather than of this adapter's own configured job bounds.
+  A budget spent before the job is `WireError::DeadlineSpent` rather than a send - checked
+  BEFORE the credential exchange too, since a spent caller should not spend it on an exchange
+  nobody waits for. **The boot path has no port `Deadline` to read** (`verify_anchor`, a fixture
+  load or drop, the identity read) and opens a fresh window from this adapter's own configured
+  `JobBounds` instead, exactly as every call did before this record. Pinned at `call_body`;
+  that `submit` hands it the exchange's own `call` is READ, not measured (`HOST` is unreachable).
 - **One page or a refusal.** `jobs.query` answers one page, and completeness is stated as
   `totalRows` beside the rows rather than by the rows alone. The wire refuses a `pageToken`
   (`WireError::MoreThanOnePage`) and a job that did not finish (`WireError::NotComplete`); the
@@ -1262,19 +1404,108 @@ every other variant and `clippy::result_large_err` is on.
 
 - `Credential` - No token could be produced, so nothing was sent.
 - `Expired` - A token was produced and its deadline had already passed.
+
+  **Checked here rather than trusted, and it is the one check that would be pointless if
+  anything were cached.** A source that hands back an expired token is a source with a clock
+  problem, and presenting it turns that into a `401` from the data system - which reads to an
+  operator as a permissions fault.
 - `NoClock` - This process could not read a wall clock.
+
+  Reachable only on a machine whose clock is before the epoch. It is a variant rather than a
+  fallback because the alternative is presenting a token whose deadline nothing compared.
 - `DeadlineSpent` - This call's budget was gone before the job could be submitted.
+
+  **Refused rather than sent with whatever budget was left, because there was none. Reachable
+  two ways, and the first is new with `docs/adr/0029`:** the port's own `Deadline` was already
+  spent when `submit` was asked to do anything at all - the exchange included, so a
+  caller that ran out of time before this adapter was even reached does not spend it on an
+  exchange nobody is still waiting for - and the older way, a token exchange slow enough to spend
+  what was left of it before the job could be built. Submitting anyway would either mean an
+  unbounded wait or a job the service keeps running after the client has stopped waiting, which
+  is the pair of failures this whole shape exists to rule out. `budget_seconds` is the port's own
+  configured budget where a request carried a `Deadline`, and this adapter's own configured
+  `JobBounds` at the boot path, where there is no caller's budget to name.
 - `RequestNotSerializable` - The request could not be serialized.
+
+  **A defect-only path, and it is named rather than unwrapped.** Everything in the body is a
+  string, a bool or a number, so nothing here can fail the serializer; the variant exists
+  because `unwrap` is denied and a silent `unwrap_or_default` would send a different query.
 - `Unreachable` - The endpoint was not reached.
 - `Unreadable` - The endpoint answered and the answer could not be read.
 - `Refused` - The endpoint refused.
+
+  The status, the endpoint's reason mapped to `ReasonCode` in `named`, and its MESSAGE in
+  `detail`. An absent or unrecognized reason carries a static local marker rather than provider
+  text, which is honest: the status is what is guaranteed.
+
+  **This used to say the message was deliberately not carried, and the field beside it was
+  built from `error.message`.** The wrong half mattered: `detail` is free text the endpoint
+  writes, it quotes the resource and the principal it refused, and `Display` interpolated it -
+  so anything that rendered this variant into a public log leaked both. `ci.yml`'s masking step
+  exists because of exactly that, and `tests/exchanged_identity.rs` prints `status` and `named`
+  and never `detail` for the same reason.
+
+  **`Display` does NOT render `detail`.** It prints the status and the closed reason code, and
+  nothing else: a cause-chain walk that flattens every link with `Display` - which is what the
+  transports' sinks do - carries the same pair and never endpoint-owned text.
+  `detail` is an `EndpointMessage`, whose `Debug` is redacted and whose raw value is reached
+  only through an explicit accessor a caller has to opt into. Each of the three renderings
+  this error can meet is therefore one of those, and the one that leaks is the one a caller
+  cannot write by accident. `docs/adr/0018` carries this decision and its limit.
 - `NotADocument` - The answer was not the document a query response is.
 - `NotComplete` - The job had not finished when the endpoint answered.
+
+  **Refused rather than polled.** The alternative is `getQueryResults`, which needs a `location`
+  this deployment does not declare - see the module header - and a partial answer is a wrong
+  number under a certified name.
+
+  **It should now be reachable only through a defect or a cancellation**, because the request
+  carries `jobTimeoutMs` equal to the client's own wait: the service cancels the job at the same
+  instant the client stops waiting for it, so an incomplete answer is no longer a live job this
+  adapter walked away from. `named` carries the endpoint's reason as a closed `ReasonCode`,
+  which for a cancelled job is the useful half.
+
+  **This is the DOCUMENTED shape `crate::transport::JobTransport::deadline_exceeded` answers
+  `true` for, and it is stated as documented rather than measured because that is exactly what
+  it is.** `timeoutMs` and `jobTimeoutMs` travel as the same number by construction - see
+  `crate::wire::document::body` - so a synchronous `jobs.query` reply cannot say *the wait
+  expired* without also saying *the service was asked to cancel at the same instant*: the
+  endpoint's own documentation of `timeoutMs` is that an expired one answers `jobComplete:
+  false`, which is this variant.
+
+  **Not yet measured against a real endpoint, and that is stated here rather than implied.** An
+  acceptance cell that raced a statement against a real deadline to reach exactly this reply was
+  tried and reverted - the corpus fixture is a handful of rows, so the round trip reliably
+  finishes before any budget short enough to matter, and a budget picked to "usually" lose that
+  race flakes against a project that bills for it. `tests/tests/deadline.rs`'s cell proves the
+  narrower claim instead - a spent port deadline refuses through the REAL wire and credential
+  before a request is sent - and leaves this variant's own shape open, closed only by a
+  statement that reliably outruns a real budget without depending on fixture size or jitter.
 - `MoreThanOnePage` - The answer is one page of more than one.
 - `NoTotal` - A complete job that stated no total.
+
+  **Refused rather than read as zero**, because zero is what a complete empty result and a
+  missing field both look like, and only one of them is an answer this adapter may certify.
+
+  This is also where a FAILED job lands: the endpoint reports one as complete with no total, so
+  `named` carries the endpoint's reason as a closed `ReasonCode` and is the whole diagnostic.
+  That is why failure is derived from the shape here rather than from `errors` being non-empty -
+  see `reported`.
 - `NotATotal` - The total was not a number.
+
+  It arrives as text, because the endpoint writes 64-bit integers as JSON strings.
+- `NotAnEstimate` - `totalBytesProcessed` was present and not a number.
+
+  Same reason as `Self::NotATotal`: the endpoint writes this 64-bit count as a JSON string
+  too. Refused rather than read as `None` - which is reserved for the field being ABSENT -
+  because a value that arrived and did not parse is a shape this adapter does not understand,
+  not a dry run that declined to price.
 - `NoSchema` - A complete job with rows and no schema to read them against.
 - `NotAScalar` - A cell that is neither a string nor a null.
+
+  Every scalar the endpoint returns is JSON text whatever its declared type; an array or an
+  object is a `REPEATED` or `RECORD` column, which is outside `crate::transport::FieldType`'s closed
+  vocabulary. It names the position rather than the value, because the value is a row.
 - `NotAListing` - The answer to a table listing was not one. Distinct from `Self::NotADocument`, the same failure for a query answer: two documents, two shapes, and one message per request.
 - `UnusablePageToken` - The service handed back a page token this transport will not write into a URL. **Refused rather than filtered**, and `tables::usable_token` carries the argument; the token travels through `bounded`, which keeps a foreign string out of a log unbounded.
 - `ListingDidNotFinish` - A dataset that did not finish listing inside the page bound. **A failure rather than a short listing**: this feeds *these tables are absent*, so a cut-off listing reports a table that is there as missing.
@@ -1344,13 +1575,17 @@ exchange spent half the budget first. When nothing is left, the refusal comes be
 **A monotonic `std::time::Instant` and not a wall clock**, because a wall clock can step and a
 stepped deadline is either a job abandoned early or one that outlives its caller.
 
-**The limit, and it is the half this type cannot reach:** one ANSWER calls the port twice -
-`Warehouse::dry_run` and then `Warehouse::execute` - and neither `Warehouse` nor `crate::transport::JobTransport`
-takes a deadline, so the two calls cannot share one. An answer's worst case is therefore
-`CALLS_PER_ANSWER` budgets rather than one, which is exactly why
-`QueryDeadline::within_request_timeout` exists: it does that arithmetic once so a composition root
-cannot get it wrong. Carrying one deadline across the port is an architecture decision, not a
-signature tweak.
+**The limit this type used to carry is resolved by `docs/adr/0029`, and the record of it stays
+here rather than being deleted, because the fix is a fact about the type above it and not about
+this one.** One ANSWER calls the port twice - `Warehouse::dry_run` and then `Warehouse::execute` -
+and this type alone could never make the two share a budget: it is opened fresh by whoever calls
+`Self::opened`/`Self::opened_at`, and nothing HERE remembers what an earlier call spent. The
+port now carries a `sutura_domain::warehouse::deadline::Deadline` - one absolute instant per
+answer - and `crate::wire::BigQueryWire::submit` opens a `CallDeadline` from what THAT says is
+left via `Self::opened_at_for`, so the sharing lives one level up, where the two port calls
+actually are. The boot path (`verify_anchor`, a fixture load or drop) has no such `Deadline` to
+read and keeps opening fresh from this adapter's own configured `QueryDeadline`, exactly as
+every call did before this record.
 
 ### `use JobBounds`
 
@@ -1362,19 +1597,23 @@ forget the other, and so `super::WireAgent` can carry them both.
 
 ### `use QueryDeadline`
 
-How long a job may run, and how long the client waits for its answer.
+How long a job may run when there is no port `Deadline` to read one from, and the ceiling this
+adapter's socket is pinned to for every call.
 
-**A newtype rather than a constant, because the value belongs to the deployment.** The setting that
-decides it is the one the transport in front of this service already uses -
-`server.request_timeout_seconds`, which ships as 30 - and a constant in this file would be a second
-copy of it that drifts the day somebody changes the first.
+**A newtype rather than a constant, because the value belongs to the deployment.** The setting
+that decides it is the one the transport in front of this service already uses -
+`server.request_timeout_seconds`, which ships as 30.
 
-**It is a SHARE of that setting rather than the setting itself**, which review had to point out:
-one answer makes `Self::CALLS_PER_ANSWER` calls and each pays `CONNECT_MARGIN` on top of its
-own budget, so filling this with 30 gives a caller who waits 30 seconds a query that may still be
-running. `Self::within_request_timeout` is the constructor that does the division, and it is the
-one a composition root should reach for; `Self::parse` stays for a deployment stating a budget
-outright.
+**It used to be a SHARE of that setting rather than the setting itself, and `docs/adr/0029` is
+why it no longer is.** One answer made two calls through this transport - `Warehouse::dry_run`
+then `execute` - and neither took a deadline, so this type had to divide `30` by the two of them
+and their own connection overhead to keep an answer inside the caller's own wait -
+`within_request_timeout` was that arithmetic, checked by nothing outside this file. The port now
+carries ONE `Deadline` shared by every call one answer makes - `CallDeadline` opens FROM it at
+request time - so this type is left with a narrower job: the boot path, which has no `Deadline`
+to read (`verify_anchor`, a fixture load or drop, the identity read), and the socket ceiling every
+call is pinned to as a backstop regardless of what a request supplies. `Self::parse` is a
+composition root's one door in, and it takes the setting directly rather than a share of it.
 
 ### `use UnusableBound`
 
@@ -1406,19 +1645,23 @@ they are argued together.
 pub struct QueryDeadline
 ```
 
-How long a job may run, and how long the client waits for its answer.
+How long a job may run when there is no port `Deadline` to read one from, and the ceiling this
+adapter's socket is pinned to for every call.
 
-**A newtype rather than a constant, because the value belongs to the deployment.** The setting that
-decides it is the one the transport in front of this service already uses -
-`server.request_timeout_seconds`, which ships as 30 - and a constant in this file would be a second
-copy of it that drifts the day somebody changes the first.
+**A newtype rather than a constant, because the value belongs to the deployment.** The setting
+that decides it is the one the transport in front of this service already uses -
+`server.request_timeout_seconds`, which ships as 30.
 
-**It is a SHARE of that setting rather than the setting itself**, which review had to point out:
-one answer makes `Self::CALLS_PER_ANSWER` calls and each pays `CONNECT_MARGIN` on top of its
-own budget, so filling this with 30 gives a caller who waits 30 seconds a query that may still be
-running. `Self::within_request_timeout` is the constructor that does the division, and it is the
-one a composition root should reach for; `Self::parse` stays for a deployment stating a budget
-outright.
+**It used to be a SHARE of that setting rather than the setting itself, and `docs/adr/0029` is
+why it no longer is.** One answer made two calls through this transport - `Warehouse::dry_run`
+then `execute` - and neither took a deadline, so this type had to divide `30` by the two of them
+and their own connection overhead to keep an answer inside the caller's own wait -
+`within_request_timeout` was that arithmetic, checked by nothing outside this file. The port now
+carries ONE `Deadline` shared by every call one answer makes - `CallDeadline` opens FROM it at
+request time - so this type is left with a narrower job: the boot path, which has no `Deadline`
+to read (`verify_anchor`, a fixture load or drop, the identity read), and the socket ceiling every
+call is pinned to as a backstop regardless of what a request supplies. `Self::parse` is a
+composition root's one door in, and it takes the setting directly rather than a share of it.
 
 ##### Methods
 
@@ -1444,6 +1687,16 @@ pub const fn parse(seconds: u64) -> Result<Self, UnusableBound>
 
 Parses a deadline in whole seconds.
 
+**The one door in, since `docs/adr/0029` retired `within_request_timeout`'s arithmetic**
+(deleted, along with the `CALLS_PER_ANSWER` constant it depended on and the `NoBudget`
+refusal it alone produced): a composition root used to have to divide
+`server.request_timeout_seconds` by how many calls one answer makes before filling this in,
+because neither call carried a budget the other could see. The port now carries one
+`sutura_domain::warehouse::deadline::Deadline` shared by every call one answer makes, so what
+this type bounds is narrower and needs no division: the boot path, which has no such
+`Deadline` to read, and the socket ceiling every call is pinned to regardless. A composition
+root fills this from `server.request_timeout_seconds` directly.
+
 ```rust
 pub const fn socket(self) -> Duration
 ```
@@ -1455,23 +1708,6 @@ really allowed is `CallDeadline::socket(left)` over what is LEFT of the call's b
 `CallDeadline`, and see the module header for why a per-operation timeout was not enough. This
 value is what the agent is configured with, so an operation that somehow reached the client
 without an override is still bounded.
-
-```rust
-pub const fn within_request_timeout(request_timeout_seconds: u64) -> Result<Self, UnusableBound>
-```
-
-The largest deadline that keeps one ANSWER inside a transport's own request timeout.
-
-**The arithmetic a composition root would otherwise have to remember, and get wrong.** The
-number to fill this from is `server.request_timeout_seconds`, which ships as thirty; what a
-caller wants is not that number but the share of it one call may spend, because an answer makes
-`Self::CALLS_PER_ANSWER` calls and each pays `CONNECT_MARGIN` on top of its own budget. So
-`within_request_timeout(30)` is ten seconds, and two calls of ten plus five is the thirty a
-caller was promised.
-
-A request timeout too short to leave anything is `UnusableBound::NoBudget` rather than a
-silently clamped value, because a deployment whose timeout cannot fit a query wants to be told
-so at startup.
 
 ##### Implements
 
@@ -1524,7 +1760,6 @@ Why a bound this adapter was handed is not usable.
 
 - `Zero` - Zero, which would refuse every question rather than bounding one.
 - `TooLarge` - Above what the endpoint accepts, or above what a bound is for.
-- `NoBudget` - A transport's request timeout too short to leave a job any budget at all.
 
 ##### Implements
 
@@ -1554,13 +1789,17 @@ exchange spent half the budget first. When nothing is left, the refusal comes be
 **A monotonic `std::time::Instant` and not a wall clock**, because a wall clock can step and a
 stepped deadline is either a job abandoned early or one that outlives its caller.
 
-**The limit, and it is the half this type cannot reach:** one ANSWER calls the port twice -
-`Warehouse::dry_run` and then `Warehouse::execute` - and neither `Warehouse` nor `crate::transport::JobTransport`
-takes a deadline, so the two calls cannot share one. An answer's worst case is therefore
-`CALLS_PER_ANSWER` budgets rather than one, which is exactly why
-`QueryDeadline::within_request_timeout` exists: it does that arithmetic once so a composition root
-cannot get it wrong. Carrying one deadline across the port is an architecture decision, not a
-signature tweak.
+**The limit this type used to carry is resolved by `docs/adr/0029`, and the record of it stays
+here rather than being deleted, because the fix is a fact about the type above it and not about
+this one.** One ANSWER calls the port twice - `Warehouse::dry_run` and then `Warehouse::execute` -
+and this type alone could never make the two share a budget: it is opened fresh by whoever calls
+`Self::opened`/`Self::opened_at`, and nothing HERE remembers what an earlier call spent. The
+port now carries a `sutura_domain::warehouse::deadline::Deadline` - one absolute instant per
+answer - and `crate::wire::BigQueryWire::submit` opens a `CallDeadline` from what THAT says is
+left via `Self::opened_at_for`, so the sharing lives one level up, where the two port calls
+actually are. The boot path (`verify_anchor`, a fixture load or drop) has no such `Deadline` to
+read and keeps opening fresh from this adapter's own configured `QueryDeadline`, exactly as
+every call did before this record.
 
 ##### Methods
 
@@ -1880,11 +2119,28 @@ because a 16 KiB file can put 16 KiB of newlines there and this string reaches a
 
 - `Unreadable` - The file could not be opened or read.
 - `TooLarge` - The file is larger than any credential document is.
+
+  Bounded before it is parsed, which is the ordering *secure by design* asks for: the cheap
+  check that stops work proportional to the input runs first. A credential file is a few
+  kilobytes at most.
 - `NotADocument` - The file is not the JSON document this expects.
 - `UnknownKind` - The file names a credential shape this build does not implement.
+
+  **It names the shape rather than saying "unsupported"**, because each named shape has a
+  different answer: the metadata server needs no file at all, and a federated credential is the
+  per-subject step. The module header lists both.
 - `Incomplete` - A document missing one of the fields its own kind needs.
 - `AnotherUniverse` - The credential was minted against a different service universe than the one this build talks to.
+
+  **Refused rather than tried.** The endpoints this crate reaches are compile-time constants in
+  the default universe, so a credential minted for another one would be presented to a service it
+  was not issued for - which is a credential sent to the wrong recipient, whatever the answer
+  turns out to be.
 - `UnreadableKey` - The private key is not a `PKCS#8` PEM block holding a key this build can sign with.
+
+  **Nothing from the key reaches the message.** The whole value is key material, so there is no
+  half of it that would be safe to quote - which is why the context is a typed `KeyUnusable`
+  naming the STAGE that refused rather than any part of the value.
 
 ##### Implements
 
@@ -1926,12 +2182,30 @@ Why no token came back.
 - `Unreachable` - The token endpoint did not answer.
 - `Unreadable` - The token endpoint answered, and the answer could not be read.
 - `Refused` - The token endpoint refused.
+
+  **The status and the provider's own short code, and not its description.** The two `OAuth`
+  fields are a fixed vocabulary - `invalid_grant`, `invalid_client` - which is what an operator
+  needs; the description is free text from another service, and this repository does not put
+  unbounded foreign text where a log will read it.
 - `NotADocument` - The answer was not the JSON document a token response is.
 - `NoToken` - The answer carried no token.
 - `AlreadyExpired` - The answer's own deadline had already passed when it arrived.
+
+  A token that is expired on delivery is a clock disagreeing with a clock, and presenting it
+  anyway would turn one clear failure into a `401` from the data system.
 - `DeadlineSpent` - The call's budget was gone before the exchange could be attempted.
+
+  **Reachable only where something before the exchange spent the whole call**, which today means a
+  clock read and a signature. It is a variant rather than a send with no timeout because a zero
+  budget handed to the client underneath means *no timeout at all* - see
+  `CallDeadline::remaining`.
 - `Unsigned` - The assertion could not be signed.
+
+  Only reachable for a `service_account`. The cause is kept: `ring`'s own error says whether the
+  key was rejected, and that is the difference between a bad key and a bad build.
 - `NotSigned` - The signature itself failed.
+
+  `ring` reports this opaquely on purpose, so there is nothing to carry beyond the fact.
 
 ##### Implements
 

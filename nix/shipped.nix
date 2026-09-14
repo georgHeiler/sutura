@@ -145,7 +145,17 @@ let
       # --features bigquery`, and before this entry nothing anywhere proved that configuration
       # LINKS on a triple this project publishes. `ureq`, rustls and `ring` are what it adds, and
       # `ring` compiles C and assembly, so the two musl triples are the answer worth having.
-      probeFeatures = [ "bigquery" ];
+      #
+      # `postgres` carries the same risk and was added later (`telekom/sutura#124`):
+      # `sutura-exec-postgres` is itself pure Rust, but this binary's `postgres` feature makes it a
+      # normal dependency and it is not optional there - `tokio-postgres-rustls` and `rustls` are
+      # what it adds, `ring` behind them, so the musl link is the same question `bigquery` already
+      # answers and had gone unasked for this feature.
+      probeFeatures = [ "bigquery" "postgres" ];
+      # This binary legitimately links `polyglot-sql`, for `compile` - `sutura-sql` is a normal
+      # dependency of `sutura-cli` and the generator is what renders the statement that
+      # subcommand prints. Nothing extra to forbid here beyond the shared list below.
+      alsoForbidden = [ ];
     }
     {
       bin = "sutura-serve";
@@ -158,11 +168,23 @@ let
       # starts the server, which is what a platform scheduling it will do.
       cmd = [ ];
       description = "identity-aware semantic data runtime for AI agents: the HTTP surface";
-      # EMPTY, and deliberately: this binary's `tls` and `bigquery` features are the same shape
-      # and the same risk, and probing both would triple a job that already compiles the whole
-      # dependency closure per target. The CLI is the one issue #121 owes a measurement for; what
-      # this list says is that adding serve's is an entry rather than a design.
+      # EMPTY, and deliberately: this binary's `tls`, `bigquery` and `postgres` features are the
+      # same shape and the same risk, and probing all three would multiply a job that already
+      # compiles the whole dependency closure per target. The CLI is the one issue #121 owes a
+      # measurement for; the `postgres` probe added above already links that closure
+      # (`tokio-postgres-rustls`, `rustls`, `ring`) through the CLI on both PR triples, so what
+      # this list says is that adding serve's OWN combination is an entry rather than a design.
       probeFeatures = [ ];
+      # `xtask/src/boundaries.rs`'s `FORBIDDEN_EDGES` holds the PLACEMENT - no catalog adapter and
+      # no compiler crate may reach `sutura-sql` - but a normal dependency added straight to
+      # `sutura-app` (the crate both `sutura-serve` and `sutura-http` sit on) is outside every one
+      # of those entries and would still put the pre-1.0 SQL generator into this binary's default
+      # closure, which renders no SQL and can reach none of it. This is the OUTCOME half: read out
+      # of the artifact's own embedded dependency list rather than out of any manifest, so a
+      # future edge the placement gate does not name still fails here, naming this binary - AT THE
+      # TAG-TRIGGERED RELEASE BUILD, where `checks.shipped-features` runs, and not on a pull
+      # request.
+      alsoForbidden = [ "polyglot-sql" ];
     }
   ];
 
@@ -587,6 +609,10 @@ let
         # list is what says they left it off** - an assertion about the ARTIFACT rather than
         # about a manifest, which is the whole reason it reads the embedded dependency list.
         # A `bigquery` that stopped being optional on either crate fails here.
+        #
+        # Shared across both binaries; a binary's own `alsoForbidden` (declared beside it above)
+        # is appended per binary in `checkOne` below, which is how `polyglot-sql` is banned from
+        # `sutura-serve` alone - `sutura` legitimately links it for `compile`.
         forbidden = [ "ring" "ureq" ];
         quoted = name: "'\"" + name + "\"'";
         wantOne = bin: name: ''
@@ -617,7 +643,7 @@ let
           fi
           echo "${b.bin}: $crates crate(s) embedded"
           ${pkgs.lib.concatMapStrings (wantOne b.bin) required.${b.bin}}
-          ${pkgs.lib.concatMapStrings (banOne b.bin) forbidden}
+          ${pkgs.lib.concatMapStrings (banOne b.bin) (forbidden ++ b.alsoForbidden)}
         '';
       in
       pkgs.runCommand "sutura-shipped-features" { nativeBuildInputs = [ pkgs.rust-audit-info ]; } ''

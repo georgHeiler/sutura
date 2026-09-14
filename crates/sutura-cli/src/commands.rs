@@ -34,6 +34,26 @@ use sutura_sql::Dialect;
 /// deployment passes a commit id.
 const DEFAULT_VERSION: &str = "local-working-tree";
 
+/// The label `catalog` and `describe` print beside a metric's `sutura_domain::expression::Computation`:
+/// `measure` for the ordinary case, `authored` for the authored-SQL one - a metric whose
+/// `authored_sql:` combines two aggregates is not a measure, and printing it as one misnames the
+/// field the same reader is told, two lines below, uses the named escape hatch.
+const fn computation_label(computation: &sutura_domain::expression::Computation) -> &'static str {
+    if computation.authored_sql().is_some() {
+        "authored"
+    } else {
+        "measure"
+    }
+}
+
+// The `{:<11}` column both call sites pad this label into leaves no space before the value once a
+// label reaches 11 characters - `const _` rather than a named constant for the same reason as
+// `capabilities.rs`: a name nothing reads, and `dead_code` is denied in this workspace.
+const _: () = assert!(
+    "measure".len() < 11 && "authored".len() < 11,
+    "a label this long touches the value in the padded column catalog/describe print it in"
+);
+
 /// The metric's definitional filters, for a person reading a catalog.
 ///
 /// Worth showing rather than hiding: a caller cannot choose these and they change what the number
@@ -133,7 +153,7 @@ pub(crate) fn catalog(args: &[String]) -> ExitCode {
                 .map(sutura_domain::model::DimensionName::as_str)
                 .collect();
             println!("{name}");
-            println!("  measure    {}", metric.measure());
+            println!("  {:<11}{}", computation_label(metric.computation()), metric.computation());
             println!("  filters    {}", render_filters(metric.required_filters()));
             println!("  grains     {}", grains.join(", "));
             println!(
@@ -178,7 +198,7 @@ pub(crate) fn describe(args: &[String]) -> ExitCode {
             .ok_or_else(|| format!("this catalog defines no metric called {wanted}"))?;
         println!("{name}");
         println!("  model      {}", metric.model());
-        println!("  measure    {}", metric.measure());
+        println!("  {:<11}{}", computation_label(metric.computation()), metric.computation());
         println!("  filters    {}", render_filters(metric.required_filters()));
         println!("  time       {}", metric.time_column());
         for (dimension_name, dimension) in metric.dimensions() {
@@ -242,10 +262,20 @@ pub(crate) fn prompt(args: &[String]) -> ExitCode {
         eprintln!("sutura: configuration from {}", settings.layers());
         let (prose, instructions) = prompt_inputs(settings.prompt())?;
         let pinned = load(Path::new(&root))?;
-        // Every operation, because the HTTP surface mounts every operation. A transport that hid one
-        // passes the subset it mounts and the workflow drops the step rather than telling an agent
-        // to call something that is not there.
-        let inputs = PromptInputs::new(Tool::ALL, prose, instructions.as_deref());
+        // Every certified operation, because the HTTP surface mounts every one of them
+        // unconditionally. A transport that hid one passes the subset it mounts and the workflow
+        // drops the step rather than telling an agent to call something that is not there.
+        //
+        // `run_sql` is added on top rather than folded into `Tool::ALL`: it is off by default and a
+        // deployment turns it on separately (`tools.run_sql.enabled`), so this command reads the
+        // SAME settings the service would boot with - the ones already loaded above - rather than
+        // assuming every deployment mounts it. A configuration this command was not told about
+        // cannot make the rendered prompt describe a tool the deployment cannot call.
+        let mut tools = Tool::ALL.to_vec();
+        if settings.tools().run_sql_enabled() {
+            tools.push(Tool::RunSql);
+        }
+        let inputs = PromptInputs::new(&tools, prose, instructions.as_deref());
         print!("{}", sutura_app::prompt::render(&pinned, &inputs));
         Ok(())
     })())
@@ -380,9 +410,32 @@ pub(crate) fn query(args: &[String]) -> ExitCode {
             settings.server().request_timeout(),
             data.as_deref(),
         )? {
-            crate::sources::Opened::Files(opened) => answered(&catalog, &question, opened, settings.runtime()),
+            crate::sources::Opened::Files(opened) => answered(
+                &catalog,
+                &question,
+                opened,
+                settings.runtime(),
+                settings.server().request_timeout(),
+                settings.spend_budget(),
+            ),
             #[cfg(feature = "bigquery")]
-            crate::sources::Opened::BigQuery(opened) => answered(&catalog, &question, opened, settings.runtime()),
+            crate::sources::Opened::BigQuery(opened) => answered(
+                &catalog,
+                &question,
+                opened,
+                settings.runtime(),
+                settings.server().request_timeout(),
+                settings.spend_budget(),
+            ),
+            #[cfg(feature = "postgres")]
+            crate::sources::Opened::Postgres(opened) => answered(
+                &catalog,
+                &question,
+                opened,
+                settings.runtime(),
+                settings.server().request_timeout(),
+                settings.spend_budget(),
+            ),
         }
     })())
 }
@@ -407,7 +460,7 @@ pub(crate) type Composed<W> = LocalService<W, TracingAuditSink, sutura_config::S
 ///
 /// `catalog` is handed over rather than a bundle rebuilt, because the constructor loads it again and
 /// re-runs every anchor - that is its contract - so the two loads cannot disagree about the version
-/// or the source name. [`crate::sources::refuse_unattached`] closes the one gap that remains: a
+/// or the source name. [`sutura_app::preflight::refuse_unattached`] closes the one gap that remains: a
 /// model added to the catalog directory between a caller's own load and the load inside `start`
 /// would otherwise be served with no table registered behind it, failing its first question at query
 /// time. Skipped for a data system nothing was attached to, which is the narrowing
@@ -430,11 +483,15 @@ pub(crate) fn started<W>(
     catalog: &LocalCatalog,
     opened: crate::sources::OpenedWith<W>,
     runtime: sutura_config::RuntimeSettings,
+    spend_budget: Option<sutura_config::SpendBudget>,
 ) -> Result<Composed<W>, String>
 where
     W: sutura_domain::warehouse::Warehouse + Send + Sync + 'static,
     W::Error: Send + Sync,
 {
+    let spend_ledger = sutura_app::SpendLedger::new(
+        spend_budget.map(|budget| sutura_app::SpendBudget::new(budget.ceiling_bytes(), budget.window())),
+    );
     let service = LocalService::start(
         catalog,
         opened.engines,
@@ -442,9 +499,11 @@ where
         opened.broker,
         runtime.working_set().bytes().get() as u64,
     )
+    .map(|service| service.with_spend_ledger(spend_ledger))
     .map_err(|cause| format!("{}\nthis bundle is not fit to serve", render(&cause)))?;
     if let Some(attached) = opened.attached {
-        crate::sources::refuse_unattached(&crate::sources::served_tables(service.definitions()), &attached)?;
+        sutura_app::preflight::refuse_unattached(&sutura_app::preflight::served_tables(service.definitions()), &attached)
+            .map_err(|changed| changed.to_string())?;
     }
     Ok(service)
 }
@@ -459,12 +518,14 @@ fn answered<W>(
     question: &Query,
     opened: crate::sources::OpenedWith<W>,
     runtime: sutura_config::RuntimeSettings,
+    request_timeout: sutura_config::RequestTimeout,
+    spend_budget: Option<sutura_config::SpendBudget>,
 ) -> Result<(), String>
 where
     W: sutura_domain::warehouse::Warehouse + Send + Sync + 'static,
     W::Error: Send + Sync,
 {
-    let service = started(catalog, opened, runtime)?;
+    let service = started(catalog, opened, runtime, spend_budget)?;
     // `Subject::TheDeploymentItself` is the honest subject: there is no transport and no caller, and
     // the identity the data system is reached under is the process's own.
     //
@@ -473,7 +534,10 @@ where
     // has no signature for it - and what the leg presents agrees with what the adapter was opened
     // under because ONE decision produced both.
     let context = RequestContext::of(PrincipalChain::of(Subject::TheDeploymentItself));
-    let outcome = service.answer(&context, question).map_err(|e| render(&e))?;
+    // One deadline, opened here: this command has no admission wait and no other caller to share it
+    // with, so the instant it is opened at is this call's own start - `docs/adr/0029`.
+    let deadline = sutura_domain::warehouse::deadline::Deadline::opened_at(std::time::Instant::now(), request_timeout.budget());
+    let outcome = service.answer(&context, question, deadline).map_err(|e| render(&e))?;
     print_outcome(&outcome)
 }
 

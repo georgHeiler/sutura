@@ -1,17 +1,16 @@
 //! The execution port: the plan that goes out, and the rows that come back.
 //!
 //! `Warehouse` names the port, not whether its implementation is a file or a cluster.
+//!
 //! **No statement appears in this module, and its absence is the decision rather than an omission.**
-//! A rendered statement used to live here, on the argument that the port had to hand one to
-//! something. The port takes a [`crate::plan::QueryPlan`] now - [`Warehouse`] below says why that is
-//! what makes a second kind of adapter possible - so nothing in the domain constructs or reads a
-//! statement, and the type that carries one moved out to `sutura-sql`, beside the code that renders
-//! it. A domain holding a rendered statement has acquired a concept no domain operation uses.
-//! What stays is [`ParamValue`], and it stays because the type the port *does* take is built out of
-//! it: a [`crate::plan::QueryPlan`] carries a vector of them. It is also where the rule lives - a
-//! value is a closed set of typed variants an adapter binds, never text somebody concatenated.
-//! [`crate::query`] is the *tool* surface, where SQL must be unrepresentable because the text would
-//! come from a caller; here there is no text for a value to reach at all.
+//! The port takes a [`crate::plan::QueryPlan`] - [`Warehouse`] says why that is what makes a second
+//! kind of adapter possible - so nothing in the domain constructs or reads a statement, and the type
+//! carrying one lives in `sutura-sql` beside the code that renders it: a domain holding a rendered
+//! statement has acquired a concept no domain operation uses. What stays is [`ParamValue`], because
+//! a [`crate::plan::QueryPlan`] carries a vector of them and because the rule lives there - a value
+//! is a closed set of typed variants an adapter binds, never text somebody concatenated.
+//! [`crate::query`] is the *tool* surface, where SQL must be unrepresentable because the text comes
+//! from a caller; here there is no text for a value to reach at all.
 
 use std::collections::BTreeSet;
 
@@ -24,38 +23,56 @@ use crate::source::{ImpersonationCapability, SourcePosture};
 /// Shared typing for deliberately simple CSV fixtures.
 #[cfg(any(test, feature = "fixtures"))]
 pub mod csv;
+pub mod estimate;
 /// The pre-flight's own vocabulary: what a data system said about the tables a bundle names.
 ///
 /// **`pub mod` with no re-export beside it, and that is a documentation decision rather than a
-/// style one.** The domain's usual shape is a private submodule plus a `pub use`, which rustdoc
-/// inlines into the parent - and it did NOT inline here: `just api` generated three
-/// `### use None` stubs and no content for these three types, so the published reference would have
-/// carried a port method returning a type it does not describe. A public module gets documented.
+/// style one.** The domain's usual shape - a private submodule plus a `pub use` - did NOT inline
+/// here: `just api` generated `### use None` stubs and no content, so the published reference would
+/// have carried a port method returning a type it does not describe. A public module gets
+/// documented.
 pub mod preflight;
+use estimate::EstimatedBytes;
 
 /// What it takes for two answers to one plan to be the same answer, for the differential legs that
 /// compare them.
 ///
 /// Behind a default-off feature, and `cfg(test)` so this crate's own suite reaches it either way -
-/// the shape `sutura_runtime::testing`'s `test-capture` established. It is here rather than in each
-/// test target because two copies of a comparison policy is how both of them came to erase the cell
-/// type; its own module header carries that story and the limits.
+/// the shape `sutura_runtime::testing`'s `test-capture` established. Here rather than in each test
+/// target because two copies of a comparison policy is how both of them came to erase the cell type;
+/// its own header carries that story and the limits.
 ///
 /// **That header links the module's OWN items by absolute `crate::` path, and that is not style.**
-/// rustc merges this `///` block with the module's `//!` one and resolves the merged block in THIS
-/// scope, where `agreement`'s items are not - so a bare-name link there resolves to nothing, and no
-/// gate in this repository reads a rustdoc warning (#321). Four of them were shipped that way.
+/// rustc merges this `///` block with the module's `//!` one and resolves it in THIS scope, where
+/// `agreement`'s items are not - so a bare-name link there resolves to nothing, and no gate here
+/// reads a rustdoc warning (#321). Four were shipped that way.
 #[cfg(any(test, feature = "agreement"))]
 pub mod agreement;
 
 /// Whether a declared join key is really unique in the table it points at.
 ///
-/// A module of its own for [`preflight`]'s reason - nothing in it is about a plan, a credential or
-/// a row - and its header carries the measurement that made the check necessary: one violated
+/// A module of its own for [`preflight`]'s reason - nothing in it is about a plan, a credential or a
+/// row - and its header carries the measurement that made the check necessary: one violated
 /// `many_to_one`, two topologies, two numbers, and a refusal from neither.
 pub mod cardinality;
 
+/// One cell of a result, and the checked real a cell may carry.
+pub mod cell;
+/// One absolute deadline per answer, and the budget it was opened from.
+///
+/// A module of its own rather than a type or two added here, for the reason [`cardinality`]
+/// already gives - and because this file was at the `max-lines` cap the day the record needed
+/// somewhere to grow (`docs/adr/0029`). `Deadline` and `Budget` are used unqualified below, the
+/// same way [`cardinality`]'s two types are.
+pub mod deadline;
+/// A result set, and an anchor's rows.
+pub mod rows;
+
+pub use cell::{NotFinite, Real, Value};
+pub use rows::{AnchorRows, MalformedRowSet, RowSet};
+
 use crate::warehouse::cardinality::{DeclaredKey, KeyUniqueness};
+use crate::warehouse::deadline::Deadline;
 use crate::warehouse::preflight::TablesPresent;
 
 /// A value bound to a placeholder.
@@ -64,20 +81,20 @@ use crate::warehouse::preflight::TablesPresent;
 /// our side. An adapter binds them with whatever its driver offers, and the driver is what decides
 /// how a date is written on the wire.
 ///
-/// **There is no `Integer`, and its absence is the decision rather than an omission.** The variant
-/// was here and nothing in the workspace constructed one: every caller value and every required
-/// filter binds as [`Text`](ParamValue::Text), because that is the type both of them are. Both
-/// adapters carried an arm for it and the goldens carried a rendering, so it read as covered while
-/// no question could reach it - and the dead arm was the lesser half of the cost. The real half is
-/// that a *numeric* definitional filter cannot be expressed safely here: `equals: { column:
-/// amount_cents, value: "500" }` compares an integer column against a text parameter, `DuckDB`
-/// casts it and answers, a driver that sends an explicitly-typed text parameter does not, and
-/// nothing refuses the definition because a [`crate::catalog::Model`] declares only column NAMES -
-/// there is no column type to check the value against. Adding the variant back without one would
-/// mean guessing the type from the value's own text, which makes a text column whose allowed value
-/// is `"500"` compare as a number: the same wrong comparison, arrived at from the other side.
+/// **There is no `Integer`, and its absence is the decision rather than an omission.** Nothing in
+/// the workspace constructed one - every caller value and every required filter binds as
+/// [`Text`](ParamValue::Text), because that is the type both of them are - while both adapters
+/// carried an arm and the goldens carried a rendering, so it read as covered while no question could
+/// reach it. The dead arm was the lesser half of the cost. The real half: a *numeric* definitional
+/// filter cannot be expressed safely here. `equals: { column: amount_cents, value: "500" }` compares
+/// an integer column against a text parameter, `DuckDB` casts it and answers, a driver sending an
+/// explicitly-typed text parameter does not, and nothing refuses the definition because a
+/// [`crate::catalog::Model`] declares only column NAMES - there is no column type to check against.
+/// Adding the variant back without one would mean guessing the type from the value's own text, which
+/// makes a text column whose allowed value is `"500"` compare as a number: the same wrong
+/// comparison from the other side.
 ///
-/// So it goes when a typed column model does, and not before. The reasoning is the one
+/// So it goes when a typed column model does, and not before - the reasoning
 /// `sutura_exec_datafusion`'s `cell` gives for leaving `Date64` unmapped: an unreachable arm holding
 /// a semantic choice nobody reviewed is worse than not having the arm.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -89,10 +106,10 @@ pub enum ParamValue {
 impl ParamValue {
     /// A human-readable form, for showing a plan to a person.
     ///
-    /// **Display only.** It is deliberately not the SQL literal for the value: a function that
-    /// produced one would be the thing somebody reaches for the day they want to inline a parameter,
-    /// and inlining a parameter is the one move this type exists to prevent. Text is quoted the way
-    /// `Debug` quotes it, which makes an empty or space-padded value visible rather than SQL-shaped.
+    /// **Display only, and deliberately not the SQL literal:** a function producing one is what
+    /// somebody reaches for the day they want to inline a parameter, which is the one move this type
+    /// exists to prevent. Text is quoted the way `Debug` quotes it, so an empty or space-padded value
+    /// is visible rather than SQL-shaped.
     pub fn render(&self) -> String {
         match *self {
             Self::Text(ref v) => format!("{v:?}"),
@@ -101,273 +118,25 @@ impl ParamValue {
     }
 }
 
-/// Why a floating-point cell was refused.
-///
-/// Two variants rather than one, because the two faults have different causes and a reader chasing
-/// one is not chasing the other: an infinity is a non-zero quantity divided by zero, and a `NaN` is
-/// zero divided by zero. The variant carries the value rather than a formatted sentence, for the
-/// reason every error in this crate does.
-#[derive(Debug, thiserror::Error, PartialEq)]
-pub enum NotFinite {
-    /// Infinite, in either direction.
-    #[error("{value} is not a finite number")]
-    Infinite { value: f64 },
-    /// Not a number at all. Its own variant rather than a value on the one above, because `NaN`
-    /// compares unequal to itself: an [`Infinite`] carrying one would make two of these errors
-    /// unequal for a reason that has nothing to do with what happened.
-    ///
-    /// [`Infinite`]: NotFinite::Infinite
-    #[error("NaN is not a number")]
-    NotANumber,
-}
-
-/// A real number a result may carry: finite, and nothing else.
-///
-/// **Parsed rather than validated, and the class it closes is larger than the bug that found it.**
-/// A cell used to be a raw `f64`, so `inf`, `-inf` and `NaN` were all representable, and
-/// [`Value::render`] turned the first of them into the string `"inf"` - an answer under a metric's
-/// own certified name that reads as data and is not a number. The route in was a ratio measure
-/// declaring `zero_denominator: fails`: both adapters cast the numerator to a floating type before
-/// dividing, so the division is IEEE float division, and IEEE float division by zero does not fail.
-/// It answers `inf`, or `NaN` when both halves are zero.
-///
-/// Making the domain type refuse a non-finite value closes all three at once, at the one boundary
-/// every adapter has to cross, rather than guarding the one variant that exposed it. An adapter that
-/// gets one back has an error naming the column, which is what `fails` was always claiming to mean.
-///
-/// Construct it with [`parse`]. The field is private, so a non-finite value is unrepresentable
-/// rather than merely rejected. There is deliberately no `Deref` and no arithmetic: two finite
-/// numbers divide to a non-finite one, so a type that let the result back in without passing
-/// [`parse`] again would be the hole this closes. [`Value`] is `Serialize` only today - if it ever
-/// gains `Deserialize`, this needs `#[serde(try_from = ..)]` routing through [`parse`], because a
-/// derived one writes straight into the private field.
-///
-/// [`parse`]: Real::parse
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
-pub struct Real(f64);
-
-impl Real {
-    /// Parses a real number, rejecting a non-finite one.
-    pub const fn parse(value: f64) -> Result<Self, NotFinite> {
-        if value.is_nan() {
-            return Err(NotFinite::NotANumber);
-        }
-        if value.is_infinite() {
-            return Err(NotFinite::Infinite { value });
-        }
-        Ok(Self(value))
-    }
-
-    /// The number, for a caller that has to do arithmetic on it.
-    ///
-    /// Named rather than reached through `Deref`, so the point at which the invariant stops applying
-    /// is a call somebody wrote.
-    #[inline]
-    pub const fn get(self) -> f64 {
-        self.0
-    }
-}
-
-/// Shortest round-trip formatting, so a value that came back as an exact decimal is rendered as one
-/// rather than as its binary expansion. Delegated rather than reimplemented, and this is the one
-/// definition [`Value::render`] uses.
-impl core::fmt::Display for Real {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::Display::fmt(&self.0, f)
-    }
-}
-
-/// Exponent form, forwarding the formatter's precision.
-///
-/// It exists because comparing two engines' floats is done at a fixed number of significant digits -
-/// summing the same rows in a different order changes the last place of an `f64` - and `{:.12e}` is
-/// how that comparison is written. A formatting trait rather than `get`, so the comparison does not
-/// have to leave the type to be expressed.
-impl core::fmt::LowerExp for Real {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        core::fmt::LowerExp::fmt(&self.0, f)
-    }
-}
-
-/// One cell of a result.
-///
-/// [`Real`] is deliberately last on the list of things to reach for. A measure over integer minor
-/// units stays exact, and an anchor comparison over a float would depend on how two languages print
-/// the same bits. It exists because `avg` has to land somewhere - and it is a checked type rather
-/// than an `f64`, so the one thing a float can be that a number cannot does not fit in a cell.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub enum Value {
-    Null,
-    Integer(i64),
-    Real(Real),
-    Text(String),
-}
-
-impl Value {
-    /// The canonical text form, which is what an anchor is compared against.
-    ///
-    /// One function so there is one answer. An anchor comparison that formatted the value at the
-    /// call site would compare differently in two places, and the failure would look like a data
-    /// problem rather than a formatting one.
-    pub fn render(&self) -> String {
-        match *self {
-            Self::Null => String::from("null"),
-            Self::Integer(v) => v.to_string(),
-            // One definition of what a real number looks like, on the type that carries one.
-            Self::Real(v) => v.to_string(),
-            Self::Text(ref v) => v.clone(),
-        }
-    }
-}
-
-/// A result set: the column labels, and the rows.
-///
-/// Labels are `String` rather than [`crate::model::ColumnName`] because a generated projection names
-/// things a model did not: the truncated time bucket, and the measure under the metric's own name.
-/// Constraining them to model column names would mean either lying about what they are or refusing
-/// to name them.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct RowSet {
-    columns: Vec<String>,
-    rows: Vec<Vec<Value>>,
-}
-
-/// Why a result set could not be built.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum MalformedRowSet {
-    /// A row has a different number of cells than there are columns.
-    ///
-    /// Checked once here rather than trusted, because every consumer downstream indexes by column
-    /// position, and the `indexing_slicing` ban means each of them would otherwise need its own
-    /// fallback for a case that must not exist.
-    #[error("row {row} has {cells} cells, and there are {columns} columns")]
-    RowWidth { row: usize, cells: usize, columns: usize },
-}
-
-impl RowSet {
-    /// Builds a result set, rejecting a ragged one.
-    pub fn new(columns: Vec<String>, rows: Vec<Vec<Value>>) -> Result<Self, MalformedRowSet> {
-        for (index, row) in rows.iter().enumerate() {
-            if row.len() != columns.len() {
-                return Err(MalformedRowSet::RowWidth {
-                    row: index,
-                    cells: row.len(),
-                    columns: columns.len(),
-                });
-            }
-        }
-        Ok(Self { columns, rows })
-    }
-
-    #[inline]
-    pub fn columns(&self) -> &[String] {
-        &self.columns
-    }
-
-    #[inline]
-    pub fn rows(&self) -> &[Vec<Value>] {
-        &self.rows
-    }
-
-    /// Where a column with this label sits, if there is exactly one.
-    ///
-    /// `None` for a label that appears twice, not the first match. Two columns with one label means
-    /// the projection is not what we think it is, and returning either of them would answer with a
-    /// number from a column nobody chose. `Definitions::assemble` refuses the catalog shapes that
-    /// could cause it, so this is the second line rather than the first.
-    pub fn column_index(&self, label: &str) -> Option<usize> {
-        let mut found = None;
-        for (index, name) in self.columns.iter().enumerate() {
-            if name == label {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(index);
-            }
-        }
-        found
-    }
-
-    /// One cell, by row and column position.
-    ///
-    /// `Option` rather than indexing, because `indexing_slicing` is denied for library crates here
-    /// and because a caller that has a position from `column_index` still should not be able to
-    /// panic on a result set that came back a different shape than expected.
-    pub fn cell(&self, row: usize, column: usize) -> Option<&Value> {
-        let cells = self.rows.get(row)?;
-        cells.get(column)
-    }
-
-    /// The single cell of a single-row, single-column result, which is what an anchor check reads.
-    ///
-    /// `None` for any other shape rather than a panic or a silent first-cell: an anchor query that
-    /// came back with three rows means the statement is not the one we thought, and reading its
-    /// first cell would turn that into a wrong number.
-    pub const fn scalar(&self) -> Option<&Value> {
-        match (self.columns.as_slice(), self.rows.as_slice()) {
-            ([_], [row]) => match row.as_slice() {
-                [cell] => Some(cell),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-}
-
 /// What a pre-flight established.
 ///
-/// **[`Self::NotAsked`] is not [`Self::Accepted`], and no caller can read it as one.** Before
-/// `dry_run` took a credential, a default of `Ok(())` was defensible: with nothing to be wrong
-/// about, "nothing went wrong" is honest. With a subject in the signature it stops being honest,
-/// because `Ok(())` from an adapter that did not look is indistinguishable from `Ok(())` from an
-/// adapter that asked the data system as that subject and was told yes - so a defaulted pre-flight
-/// would read as "this subject may run this plan" for every adapter that declined to implement one.
-///
-/// The shape is the one the row cap already uses, where `row_limit()` is `max_rows + 1` so a result
-/// *at* the cap is distinguishable from one cut off *by* it. `docs/adr/0008` part 1 is the decision.
+/// **[`Self::NotAsked`] is not [`Self::Accepted`], and no caller can read it as one.** With a
+/// subject in `dry_run`'s signature, a default of `Ok(())` stops being honest: it is
+/// indistinguishable from an adapter that asked the data system as that subject and was told yes, so
+/// a defaulted pre-flight would read as *this subject may run this plan* for every adapter that
+/// declined to implement one. The shape is the row cap's, where `row_limit()` is `max_rows + 1` so a
+/// result *at* the cap is distinguishable from one cut off *by* it. `docs/adr/0008` part 1 decides.
 ///
 /// **The limit, stated with the claim:** [`Self::Accepted`] is the data system's opinion at
-/// pre-flight time and not a guarantee about `execute`, so it is worth a round trip and is not an
-/// authorization decision. Nothing in the plan path may treat it as one, and there is no mechanism
-/// that would stop it - skipping a check on the strength of `Accepted` is a review question.
+/// pre-flight time, not a guarantee about `execute` and not an authorization decision. Nothing in
+/// the plan path may treat it as one, and no mechanism would stop it - skipping a check on the
+/// strength of `Accepted` is a review question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreFlight {
-    /// The adapter did not ask. The default, and the honest answer for an adapter where checking
-    /// costs what running costs.
+    /// The adapter did not ask. The default, and the honest answer for an adapter where checking costs what running costs.
     NotAsked,
-    /// The data system was asked, as this subject, and accepted the plan.
-    Accepted,
-}
-
-/// The rows one anchor's plan produced at boot.
-///
-/// **A wrapper with a private field, so a boot result cannot be handed back to a caller as an
-/// answer without a named conversion somebody wrote.** The anchor path and the request path are two
-/// ways into a data system and they run as different identities: `execute` takes the asking
-/// subject's credential and cannot be called without one, and [`Warehouse::verify_anchor`] takes no
-/// credential at all - it runs as whatever identity the deployment configured that adapter with,
-/// which is what `docs/adr/0008` part 1 decides for a path that has no caller.
-///
-/// Two types rather than one so the separation is visible at a call site rather than in a comment.
-/// [`Self::verified_at_boot`] is named to be conspicuous in review and in a grep, the way
-/// `crate::identity::Secret::expose_secret` is.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AnchorRows(RowSet);
-
-impl AnchorRows {
-    /// What an adapter returns from a verification run.
-    #[inline]
-    #[must_use]
-    pub const fn of(rows: RowSet) -> Self {
-        Self(rows)
-    }
-
-    /// The rows, for the boot path that compares them against what an author certified.
-    #[inline]
-    #[must_use]
-    pub const fn verified_at_boot(&self) -> &RowSet {
-        &self.0
-    }
+    /// The data system was asked, as this subject, and accepted the plan - see [`estimate::EstimatedBytes`].
+    Accepted { estimated_bytes: Option<EstimatedBytes> },
 }
 
 /// Where a plan runs.
@@ -443,6 +212,7 @@ impl AnchorRows {
 /// use sutura_domain::model::SourceName;
 /// use sutura_domain::plan::{AnchorPlan, Executable};
 /// use sutura_domain::source::SourcePosture;
+/// use sutura_domain::warehouse::deadline::Deadline;
 /// use sutura_domain::warehouse::{AnchorRows, RowSet, Warehouse};
 ///
 /// struct Undeclared {
@@ -462,7 +232,7 @@ impl AnchorRows {
 ///         &self.posture
 ///     }
 ///
-///     fn execute(&self, _executable: Executable<'_>, _presented: &Presented) -> Result<RowSet, Self::Error> {
+///     fn execute(&self, _executable: Executable<'_>, _presented: &Presented, _deadline: Deadline) -> Result<RowSet, Self::Error> {
 ///         Err(core::fmt::Error)
 ///     }
 ///
@@ -480,6 +250,7 @@ impl AnchorRows {
 /// use sutura_domain::model::SourceName;
 /// use sutura_domain::plan::{AnchorPlan, Executable};
 /// use sutura_domain::source::{ImpersonationCapability, SourcePosture};
+/// use sutura_domain::warehouse::deadline::Deadline;
 /// use sutura_domain::warehouse::{AnchorRows, RowSet, Warehouse};
 ///
 /// struct Declared {
@@ -500,7 +271,7 @@ impl AnchorRows {
 ///         &self.posture
 ///     }
 ///
-///     fn execute(&self, _executable: Executable<'_>, _presented: &Presented) -> Result<RowSet, Self::Error> {
+///     fn execute(&self, _executable: Executable<'_>, _presented: &Presented, _deadline: Deadline) -> Result<RowSet, Self::Error> {
 ///         Err(core::fmt::Error)
 ///     }
 ///
@@ -552,6 +323,41 @@ pub trait Warehouse {
     /// number.
     const EXECUTES_LEGS: bool = false;
 
+    /// Whether this adapter can execute a metric whose computation is
+    /// [`Computation::AuthoredSql`](crate::expression::Computation::AuthoredSql) - SQL a catalog
+    /// author wrote, rather than a measure the generator composes.
+    ///
+    /// **Defaulted to `false`, and no adapter this workspace ships opts in.** An authored fragment
+    /// is stored as written: the domain holds no SQL parser, a [`crate::plan::QueryPlan`] carries
+    /// no SQL, and nothing published compiles the fragment - so an adapter that says nothing is
+    /// treated as unable to execute one, and a bundle carrying an authored metric is refused at
+    /// startup as
+    /// [`NotValidated::AuthoredSqlNotExecutable`](crate::pinned::NotValidated::AuthoredSqlNotExecutable)
+    /// rather than served with the metric skipped or a measure substituted. `docs/adr/0004` is the
+    /// decision. Opting in is a claim that the adapter itself compiles the fragment against the
+    /// model - which is where the compile belongs, beside the code that renders for that dialect -
+    /// and executes it; the first adapter to make that claim brings the test that holds it.
+    const EXECUTES_AUTHORED_SQL: bool = false;
+
+    /// Whether an accepted [`PreFlight`] can carry a real [`estimate::EstimatedBytes`], rather than
+    /// [`PreFlight::Accepted`]'s `estimated_bytes` always answering `None`.
+    ///
+    /// **Defaulted to `false`, the safe direction for the reason [`Self::EXECUTES_LEGS`]'s is**: an
+    /// adapter that says nothing is held to answer `None` on every accepted pre-flight, so nothing
+    /// downstream can read an adapter that never priced anything as though `Some(0)` meant "this
+    /// will cost nothing" rather than "nobody asked". Only an adapter whose `dry_run` reads a real
+    /// byte count off its data system - `BigQueryWarehouse` decodes `totalBytesProcessed` from the
+    /// wire - declares `true`.
+    ///
+    /// This is the capability constant `crate::warehouse::PreFlight`'s own doc and
+    /// `sutura_conformance::execute::a_preflight_that_accepts_is_followed_by_an_answer`'s once
+    /// named as missing: without it, an adapter that returned `Some(0)` where it never priced
+    /// anything, or `None` where it could, would be indistinguishable from one that got the
+    /// distinction right. **The pack checks this constant against what `dry_run` actually returns,
+    /// for every adapter it binds** - it is not itself a proof that `BigQuery`'s real endpoint
+    /// prices correctly, since `BigQuery` has no `execute_packs!` binding to run the check against.
+    const PRICES_DRY_RUN: bool = false;
+
     /// The name a plan uses to select this adapter.
     fn source(&self) -> &SourceName;
 
@@ -593,7 +399,18 @@ pub trait Warehouse {
     /// the subject cannot see. The check has to be asked as the same principal as the question, or it
     /// answers a different question - which is also why the return type is [`PreFlight`] rather than
     /// `()`. See that type for what its two variants keep apart.
-    fn dry_run(&self, _executable: Executable<'_>, _presented: &Presented) -> Result<PreFlight, Self::Error> {
+    ///
+    /// **And it takes the deadline, for [`execute`](Warehouse::execute)'s reason.** Against a
+    /// networked data system a pre-flight is a round trip that spends part of one answer's budget,
+    /// so an adapter that honours it needs to know what is left before it starts one. `docs/adr/0029`
+    /// is the record; every adapter in this slice accepts the parameter and ignores it - carried, not
+    /// enforced here.
+    fn dry_run(
+        &self,
+        _executable: Executable<'_>,
+        _presented: &Presented,
+        _deadline: Deadline,
+    ) -> Result<PreFlight, Self::Error> {
         Ok(PreFlight::NotAsked)
     }
 
@@ -639,14 +456,49 @@ pub trait Warehouse {
     /// ```
     ///
     /// The compiling twin, so the block above cannot be passing for a typo - the only difference is
-    /// the argument that says whose credential this runs under:
+    /// the two arguments that say whose credential this runs under and by when it has to be done:
     ///
     /// ```
     /// use sutura_domain::identity::Presented;
     /// use sutura_domain::plan::Executable;
+    /// use sutura_domain::warehouse::deadline::Deadline;
     /// use sutura_domain::warehouse::{RowSet, Warehouse};
     ///
     /// fn _as_the_asker<W: Warehouse>(
+    ///     warehouse: &W,
+    ///     executable: Executable<'_>,
+    ///     presented: &Presented,
+    ///     deadline: Deadline,
+    /// ) -> Result<RowSet, W::Error> {
+    ///     warehouse.execute(executable, presented, deadline)
+    /// }
+    /// ```
+    ///
+    /// # The deadline is a parameter too, opened by the transport before this call was ever reached
+    ///
+    /// One absolute [`Deadline`] per answer, shared by the pre-flight, this call, and every leg of a
+    /// federated answer - never re-derived, never divided. `docs/adr/0029` is the record: what an
+    /// adapter does with it is the adapter's own business, because the interrupt that actually stops
+    /// a data system is that data system's, and this port cannot make one uniform. [`Self::deadline_exceeded`]
+    /// is how an adapter reports that its own failure WAS the deadline, for a caller above this port
+    /// that has no way to inspect [`Self::Error`] itself.
+    ///
+    /// **Every adapter in this slice accepts the parameter and ignores it.** Carried, not enforced
+    /// here - the engine, `BigQuery` and Postgres each stop their own data system with it in a later
+    /// change behind `telekom/sutura#160`, and `docs/adr/0029`'s table says which mechanism per
+    /// adapter. An adapter that ignores the deadline mid-call is not caught until its own `Result`
+    /// comes back; what IS caught here, before this call is ever made, is a budget already spent -
+    /// `sutura_app::answer` and `sutura_app::federated`'s leg functions both ask before every call.
+    ///
+    /// The call a caller who remembered `presented` but not `deadline` would actually write - the
+    /// shape this parameter's own addition produced - does not compile either:
+    ///
+    /// ```compile_fail
+    /// use sutura_domain::identity::Presented;
+    /// use sutura_domain::plan::Executable;
+    /// use sutura_domain::warehouse::{RowSet, Warehouse};
+    ///
+    /// fn _forgot_the_deadline<W: Warehouse>(
     ///     warehouse: &W,
     ///     executable: Executable<'_>,
     ///     presented: &Presented,
@@ -654,7 +506,12 @@ pub trait Warehouse {
     ///     warehouse.execute(executable, presented)
     /// }
     /// ```
-    fn execute(&self, executable: Executable<'_>, presented: &Presented) -> Result<RowSet, Self::Error>;
+    ///
+    /// Its compiling twin is `_as_the_asker` above - three arguments, not two - which is the whole
+    /// point: nothing here checks the ARITY, the compiler already does, so this pair is honest about
+    /// proving only that the third argument exists and is a `Deadline`, not that a reviewer needs to
+    /// remember to ask for it.
+    fn execute(&self, executable: Executable<'_>, presented: &Presented, deadline: Deadline) -> Result<RowSet, Self::Error>;
 
     /// Re-runs one anchor's plan, under the identity this adapter was configured with.
     ///
@@ -763,6 +620,30 @@ pub trait Warehouse {
         false
     }
 
+    /// Was this [`dry_run`](Warehouse::dry_run) or [`execute`](Warehouse::execute) failure the
+    /// deadline: fired at the data system, or found already spent before the statement was sent?
+    ///
+    /// **The fourth predicate beside [`working_set_exhausted`](Warehouse::working_set_exhausted),
+    /// [`result_did_not_fit`](Warehouse::result_did_not_fit) and
+    /// [`source_refused`](Warehouse::source_refused), for their exact reason: `Self::Error` is the
+    /// adapter's own type, so nothing above this port can tell a stopped question from a dropped
+    /// connection, and a predicate is what lets the domain ask without an adapter minting its own
+    /// [`RefusalReason`](crate::query::RefusalReason).** `true` leaves as
+    /// [`RefusalReason::DeadlineExceeded`](crate::query::RefusalReason::DeadlineExceeded), audited
+    /// and answered `422` rather than the retryable failure a data system being down produces -
+    /// `docs/adr/0029` argues both directions once.
+    ///
+    /// Defaulted to `false`, which is the honest answer for an adapter that does not yet read the
+    /// deadline at all: every adapter in this slice takes the default, because carrying the
+    /// parameter and stopping the data system with it are two different changes and this one is the
+    /// first. An adapter that does read it and cannot tell its own timeout from another failure must
+    /// still answer `false`, for [`result_did_not_fit`](Warehouse::result_did_not_fit)'s reason - the
+    /// two mistakes do not cost the same, and a transport failure reported as a stopped deadline
+    /// tells a caller not to retry something a retry might answer.
+    fn deadline_exceeded(&self, _error: &Self::Error) -> bool {
+        false
+    }
+
     /// Does this data system hold the tables the bundle names?
     ///
     /// **Asked once, at boot, before a listener is bound**, and it exists to close an asymmetry
@@ -805,11 +686,10 @@ pub trait Warehouse {
     /// **Added because the first version of the pre-flight could not tell those apart, and a review
     /// found what that cost.** [`preflight`](Warehouse::preflight)'s `Err` is *could not verify*, and
     /// a composition root's reasonable response to that is a warning rather than a refusal - a
-    /// deployment whose data system is briefly unreachable at boot still has to be able to serve.
-    /// But a data system that refused because the identity lacks the permission to LIST is a
-    /// different thing entirely: it will refuse again on every boot, forever, and the fix is one
-    /// grant. Collapsed into the warning, the check silently does nothing in exactly the deployment
-    /// least likely to read a startup log.
+    /// deployment whose data system is briefly unreachable at boot still has to be able to serve. But
+    /// a data system that refused because the identity lacks the permission to LIST will refuse again
+    /// on every boot, forever, and the fix is one grant - collapsed into the warning, the check
+    /// silently does nothing in exactly the deployment least likely to read a startup log.
     ///
     /// `true` means *this identity may not ask*, and a composition root is expected to refuse and
     /// name the grant. `false` is every other failure, including one whose text happens to mention
@@ -817,30 +697,23 @@ pub trait Warehouse {
     ///
     /// **A predicate rather than a conversion, and a `bool` rather than a reason**, for
     /// [`result_did_not_fit`](Warehouse::result_did_not_fit)'s reasons exactly: `Self::Error` is the
-    /// adapter's own type so nothing above this port can read it, and the refusal vocabulary stays
-    /// the domain's. The adapter's error already carries the detail an operator needs, and it travels
-    /// as the cause.
+    /// adapter's own type so nothing above this port can read it, and the refusal vocabulary stays the
+    /// domain's - the adapter's error already carries the detail an operator needs, travelling as the cause.
     ///
-    /// Defaulted to `false`, which is the honest answer for an adapter that cannot tell the two apart
-    /// and for one whose [`preflight`](Warehouse::preflight) never fails. **The default is the safe
-    /// direction here, and it is the opposite direction from the other two predicates on this
-    /// trait:** a refusal reported as a transport hiccup leaves a deployment serving unverified,
-    /// which is where this whole check started; a transport hiccup reported as a refusal stops a
-    /// deployment that would have worked. Answering `false` picks the first, because it is the
-    /// status quo rather than a new failure mode - and an adapter that knows better says so.
+    /// Defaulted to `false`, honest for an adapter that cannot tell the two apart or whose
+    /// [`preflight`](Warehouse::preflight) never fails. **The safe direction, and the opposite of
+    /// this trait's other two predicates:** a refusal reported as a hiccup leaves a deployment
+    /// serving unverified - where this check started; a hiccup reported as a refusal stops a
+    /// deployment that would have worked. `false` picks the status quo over a new failure mode.
     ///
-    /// **WHAT THE DEFAULT COSTS, beside the direction it argues, because review pointed out that the
-    /// argument above had no risk stated next to it.** This trait's own rule is *required with no
-    /// default where the absence changes what a caller may believe*, and here the absence does: the
-    /// next adapter that overrides [`preflight`](Warehouse::preflight) - so it really asks - and
-    /// forgets this predicate gets *never a refusal*, silently, which is the permanent-`WARN`
-    /// collapse this pair was added to remove. Nothing catches that; a defaulted method has no
-    /// `compile_fail` twin to write. It is defaulted anyway, and the price of the other direction is
-    /// what decided it: three adapters that cannot fail a pre-flight at all would each have to write
-    /// `false`, and a required method whose only honest answer is a constant is how a port teaches
-    /// its implementors to answer without reading. So this is a JUDGEMENT with a live risk under it
-    /// rather than a property - the pairing is held by review, and an adapter that overrides one of
-    /// the two and not the other is what a reviewer of that adapter has to look for.
+    /// **WHAT THE DEFAULT COSTS**, per review: this trait's own rule is *required with no default
+    /// where the absence changes what a caller may believe*, and here it does - an adapter that
+    /// overrides [`preflight`](Warehouse::preflight) so it really asks, and forgets this predicate,
+    /// gets *never a refusal*, silently, the permanent-`WARN` collapse this pair exists to remove.
+    /// Nothing catches that; a defaulted method has no `compile_fail` twin. Defaulted anyway, because
+    /// three adapters that cannot fail a pre-flight at all would each have to write `false` - so this
+    /// is a JUDGEMENT held by review, not a checked property, and pairing the two is what a reviewer
+    /// of an adapter overriding one of them has to look for.
     fn preflight_was_refused(&self, _error: &Self::Error) -> bool {
         false
     }
@@ -870,131 +743,18 @@ pub trait Warehouse {
     fn declared_key(&self, _key: DeclaredKey<'_>) -> Result<KeyUniqueness, Self::Error> {
         Ok(KeyUniqueness::NotAsked)
     }
+
+    /// Whether this adapter accepts a raw statement - `false` by default; see [`crate::raw`], `docs/adr/0013`.
+    const ACCEPTS_RAW_STATEMENTS: bool = false;
+
+    /// Runs one literal statement for the raw SQL tool - not what [`execute`](Warehouse::execute) uses; see [`crate::raw`].
+    fn execute_raw(&self, _statement: &crate::raw::RawStatement, _presented: &Presented) -> RawExecution<Self::Error> {
+        None
+    }
 }
+
+pub mod raw; // `docs/adr/0013`'s raw types - carved out: this file hit the thousand-line limit.
+pub use raw::{RawColumnsAndRows, RawExecution, RawRows};
 
 #[cfg(test)]
-mod tests {
-    use super::{MalformedRowSet, NotFinite, ParamValue, Real, RowSet, Value};
-    use crate::calendar::Date;
-
-    fn real(value: f64) -> Real {
-        Real::parse(value).expect("a test literal is finite")
-    }
-
-    #[test]
-    fn a_parameter_renders_for_a_reader_and_not_as_sql() {
-        // The rendering exists so `sutura compile` can show a plan. It must not look like something
-        // to paste into a statement: text keeps its quotes so an empty or padded value is visible,
-        // and nothing here escapes anything, because escaping is what a bind parameter replaces.
-        assert_eq!(
-            ParamValue::Date(Date::parse("2026-06-01").expect("a test date is a date")).render(),
-            "2026-06-01"
-        );
-        assert_eq!(ParamValue::Text(String::from("north")).render(), "\"north\"");
-        assert_eq!(ParamValue::Text(String::new()).render(), "\"\"");
-        // A value that would be an injection if it were text in a statement renders visibly as a
-        // value rather than as syntax.
-        assert_eq!(ParamValue::Text(String::from("a' OR '1'='1")).render(), "\"a' OR '1'='1\"");
-    }
-
-    #[test]
-    fn a_ragged_result_set_is_rejected_once_rather_than_handled_everywhere() {
-        // Every consumer reads cells by column position. Without this check each of them needs its
-        // own fallback for a shape that must not exist, and under the `indexing_slicing` ban those
-        // fallbacks are where a wrong value gets substituted for a missing one.
-        assert_eq!(
-            RowSet::new(vec![String::from("a"), String::from("b")], vec![vec![Value::Integer(1)]],).unwrap_err(),
-            MalformedRowSet::RowWidth {
-                row: 0,
-                cells: 1,
-                columns: 2,
-            }
-        );
-    }
-
-    #[test]
-    fn scalar_refuses_any_shape_that_is_not_one_cell() {
-        // An anchor check reads this. If it returned the first cell of a three-row result, an
-        // anchor would silently pass against a statement that grouped when it should not have.
-        let one = RowSet::new(vec![String::from("v")], vec![vec![Value::Integer(7)]]).expect("one cell is a valid result");
-        assert_eq!(one.scalar(), Some(&Value::Integer(7)));
-
-        let two_rows = RowSet::new(
-            vec![String::from("v")],
-            vec![vec![Value::Integer(7)], vec![Value::Integer(8)]],
-        )
-        .expect("two rows is a valid result");
-        assert_eq!(two_rows.scalar(), None);
-
-        let two_columns = RowSet::new(
-            vec![String::from("a"), String::from("b")],
-            vec![vec![Value::Integer(7), Value::Integer(8)]],
-        )
-        .expect("two columns is a valid result");
-        assert_eq!(two_columns.scalar(), None);
-
-        let empty = RowSet::new(vec![String::from("v")], vec![]).expect("no rows is a result");
-        assert_eq!(empty.scalar(), None);
-    }
-
-    #[test]
-    fn rendering_is_one_function_so_an_anchor_compares_the_same_way_everywhere() {
-        assert_eq!(Value::Integer(197_122).render(), "197122");
-        assert_eq!(Value::Text(String::from("north")).render(), "north");
-        assert_eq!(Value::Null.render(), "null");
-        // Shortest round-trip: an exact decimal comes back as one rather than as 0.30000000000000004.
-        assert_eq!(Value::Real(real(0.3_f64)).render(), "0.3");
-    }
-
-    #[test]
-    fn a_cell_cannot_hold_a_number_that_is_not_one() {
-        // THE BUG THIS EXISTS FOR. `Real` used to be a raw `f64`, so a ratio measure declaring
-        // `zero_denominator: fails` answered the string "inf" under its own certified metric name:
-        // both adapters cast the numerator to a floating type before dividing, so the division is
-        // IEEE float division, and IEEE float division by zero does not fail. Nothing between the
-        // data system and the caller looked at the value, because nothing had a place to.
-        //
-        // Asserted over all three of the class rather than over the one variant that exposed it: a
-        // guard on the division would have left `-inf` and `NaN` representable.
-        assert_eq!(
-            Real::parse(f64::INFINITY).unwrap_err(),
-            NotFinite::Infinite { value: f64::INFINITY }
-        );
-        assert_eq!(
-            Real::parse(f64::NEG_INFINITY).unwrap_err(),
-            NotFinite::Infinite {
-                value: f64::NEG_INFINITY
-            }
-        );
-        assert_eq!(Real::parse(f64::NAN).unwrap_err(), NotFinite::NotANumber);
-        // The messages an adapter's error chain ends in, so the reader is told which of the three.
-        assert_eq!(
-            Real::parse(f64::INFINITY).unwrap_err().to_string(),
-            "inf is not a finite number"
-        );
-        assert_eq!(
-            Real::parse(f64::NEG_INFINITY).unwrap_err().to_string(),
-            "-inf is not a finite number"
-        );
-        assert_eq!(Real::parse(f64::NAN).unwrap_err().to_string(), "NaN is not a number");
-
-        // And what a real number still does, so this is not a test that would pass with every float
-        // refused. Zero and the subnormals are finite, and a metric that legitimately answers zero
-        // must not be caught by a check aimed at a division by it.
-        for finite in [0.0_f64, -0.0_f64, 0.3_f64, f64::MIN, f64::MAX, f64::MIN_POSITIVE] {
-            // Compared as bits rather than with `==`, which `float_cmp` bans for the reason it exists:
-            // the assertion here is that the value came through UNCHANGED, and bit equality is that
-            // claim exactly. It also keeps negative zero distinguishable from zero.
-            assert_eq!(real(finite).get().to_bits(), finite.to_bits(), "{finite} is a finite number");
-        }
-    }
-
-    #[test]
-    fn a_real_number_renders_the_same_way_wherever_it_is_formatted() {
-        // `Value::render` is what an anchor is compared against and `{:.12e}` is what a differential
-        // comparison between two engines uses. Both go through this one type, so neither can drift
-        // into its own idea of what the number looks like.
-        assert_eq!(format!("{}", real(0.3_f64)), "0.3");
-        assert_eq!(format!("{:.12e}", real(190_007.333_333_333_34_f64)), "1.900073333333e5");
-    }
-}
+mod tests;

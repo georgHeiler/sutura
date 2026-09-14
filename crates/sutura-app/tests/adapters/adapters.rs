@@ -133,6 +133,16 @@ pub(crate) fn presented() -> sutura_domain::identity::Presented {
     }
 }
 
+/// The port's deadline every adapter in this matrix executes under - a generous budget, since
+/// nothing in this suite is about time.
+pub(crate) fn deadline() -> sutura_domain::warehouse::deadline::Deadline {
+    sutura_domain::warehouse::deadline::Deadline::opened_at(
+        std::time::Instant::now(),
+        sutura_domain::warehouse::deadline::Budget::parse(std::time::Duration::from_secs(30))
+            .expect("thirty seconds is a budget"),
+    )
+}
+
 /// Never returned: this broker mints from a constant.
 #[derive(Debug, thiserror::Error)]
 #[error("the matrix's credential broker cannot fail")]
@@ -257,6 +267,22 @@ impl CatalogUnderTest for sutura_catalog_datahub::DataHubCatalog<sutura_catalog_
 
     fn open() -> Self {
         sutura_catalog_datahub::fixture::over_fixture_source(source(), version())
+    }
+}
+
+/// The narrowest metadata source: `Rdbms`, opened over its recorded dictionary corpus.
+///
+/// Like `datahub`, its corpus is NOT the example markdown - a database dictionary is not a directory
+/// of YAML either - so this opens over the crate's own recorded corpus, which is what a
+/// `sources.<alias>`-per database deployment reads. The universal cells hold because the dictionary
+/// bundle is measured against the adapter's declaration, which is the whole point of the `declaring`
+/// path. It provides no measure at all - the narrowest declaration - so it answers no certified
+/// question, which the declare cells assert rather than the golden cells (it gets no golden cell).
+impl CatalogUnderTest for sutura_catalog_rdbms::RdbmsCatalog<sutura_catalog_rdbms::fixture::FixtureReader> {
+    const NAME: &'static str = "rdbms";
+
+    fn open() -> Self {
+        sutura_catalog_rdbms::fixture::over_fixture_source(source(), version())
     }
 }
 
@@ -490,6 +516,18 @@ macro_rules! registered {
             datahub,
             declaring,
             sutura_catalog_datahub::DataHubCatalog<sutura_catalog_datahub::fixture::FixtureReader>
+        );
+        // `sutura-catalog-rdbms`, the narrowest metadata source: a DECLARING adapter over an RDBMS
+        // dictionary that supplies the physical model, the descriptions and the join columns a
+        // foreign key records and NOTHING else - no measure, no grain, no definitional filter, no
+        // value allowlist and no anchor. It gets the universal cells and no golden-only cell and is
+        // measured against its own declaration - `docs/adr/0011` specifies it, `docs/adr/0016`
+        // decides the declaring path. Its corpus is the crate's recorded dictionary rather than the
+        // example markdown.
+        $cell!(
+            rdbms,
+            declaring,
+            sutura_catalog_rdbms::RdbmsCatalog<sutura_catalog_rdbms::fixture::FixtureReader>
         );
     };
 

@@ -53,6 +53,11 @@ and there are exactly two ways in: one takes no argument, and the other takes a
 every field it might have is a field handed to anybody who can route a packet. No version, no
 build, no configuration, no catalog. A test asserts the body byte for byte.
 
+A directly validating deployment also exposes its RFC 9728 protected-resource metadata without a
+token. That document is deliberately only the exact resource identifier and the configured
+authorization server; it is absent in gateway and single-player deployments and shares the probe
+rate limit with liveness.
+
 # What is deliberately absent
 
 * **No CORS layer.** A browser is not a client of this surface. An allow-list nobody needs is an
@@ -121,6 +126,12 @@ What this request's caller may do.
 
 See the module documentation for the two cases and for why the second is not a fallback.
 
+`run_sql_enabled` narrows the result AFTER either case, and deliberately not inside them: a
+deployment-level switch and a caller's own scope are two different reasons a capability is
+absent, and `Permitted::without` is what applies the first without `Permitted` growing a
+second notion of what a scope is. `docs/adr/0013`'s off-by-default raw SQL tool is the first
+capability this applies to; a second one gains a parameter here rather than a widened boolean.
+
 ## `use require_capability`
 
 Refuses a request for a capability this caller was not granted.
@@ -128,6 +139,9 @@ Refuses a request for a capability this caller was not granted.
 A layer over the versioned subtree rather than a check in each handler, so there is nothing for a
 handler to forget. Installed INSIDE `crate::inbound::gate::require_verified_caller`, which is what
 makes the extension available here - see `crate::router` for the whole order.
+
+Takes the state now, for one reading: `settings.tools().run_sql_enabled()`. `docs/adr/0013`'s tool
+must be absent for every caller when a deployment never turned it on - see `permitted_for`.
 
 ## `use ClientAddress`
 
@@ -412,7 +426,7 @@ The route template, as it appears in the generated document and in `MatchedPath`
 ### `fn governed`
 
 ```rust
-pub fn governed() -> [GovernedRoute; 2]
+pub fn governed() -> [GovernedRoute; 3]
 ```
 
 Every route this crate governs.
@@ -438,17 +452,23 @@ layer is installed on the versioned subtree only, and assembly proved every rout
 ### `fn permitted_for`
 
 ```rust
-pub fn permitted_for(request: &axum::extract::Request) -> sutura_app::Permitted
+pub fn permitted_for(request: &axum::extract::Request, run_sql_enabled: bool) -> sutura_app::Permitted
 ```
 
 What this request's caller may do.
 
 See the module documentation for the two cases and for why the second is not a fallback.
 
+`run_sql_enabled` narrows the result AFTER either case, and deliberately not inside them: a
+deployment-level switch and a caller's own scope are two different reasons a capability is
+absent, and `Permitted::without` is what applies the first without `Permitted` growing a
+second notion of what a scope is. `docs/adr/0013`'s off-by-default raw SQL tool is the first
+capability this applies to; a second one gains a parameter here rather than a widened boolean.
+
 ### `fn require_capability`
 
 ```rust
-pub async fn require_capability(request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response
+pub async fn require_capability(__arg0: axum::extract::State<crate::state::ServiceState>, request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response
 ```
 
 Refuses a request for a capability this caller was not granted.
@@ -456,6 +476,9 @@ Refuses a request for a capability this caller was not granted.
 A layer over the versioned subtree rather than a check in each handler, so there is nothing for a
 handler to forget. Installed INSIDE `crate::inbound::gate::require_verified_caller`, which is what
 makes the extension available here - see `crate::router` for the whole order.
+
+Takes the state now, for one reading: `settings.tools().run_sql_enabled()`. `docs/adr/0013`'s tool
+must be absent for every caller when a deployment never turned it on - see `permitted_for`.
 
 ## Module `client_address`
 
@@ -579,6 +602,10 @@ What this catalog defines.
 #### `constant QUERY`
 
 Asking one certified question.
+
+#### `constant RUN_SQL`
+
+Running one raw SQL statement - `docs/adr/0013`'s tool, off by default.
 
 ## Module `correlation`
 
@@ -748,26 +775,22 @@ is asking and still reads every row as one identity. The startup log prints that
 boot, out of `sutura_config::InboundIdentity::what_it_does_not_do`, rather than leaving a reader to
 infer it.
 
-# The five things this does not build, and each is named rather than left to be discovered
+# The four things this does not build, and each is named rather than left to be discovered
 
 An overstated claim is itself the defect, so each of these is written down here rather than found:
 
 1. **A JWKS endpoint.** Keys are read from a file. The cache, the unknown-key refetch and the rate
    limit on it are built and are what a URL source would need anyway - see `keys` for the whole
    argument and for the one property a file cannot have.
-2. **The two metadata documents.** A directly validating deployment is supposed to serve
-   protected-resource metadata a client can read to learn which authorization server governs it.
-   There is no such route. The `401` carries an RFC 6750 challenge naming the realm and no
-   `resource_metadata` parameter, so a client is configured with its issuer out of band.
-3. **Anything about client registration or client authentication.** Those are decisions for the
+2. **Anything about client registration or client authentication.** Those are decisions for the
    authorization server and for the client; this deployment is a resource server and validates what
    arrives.
-4. **A ceiling derived from a scope.** `Scopes` is now read by exactly one thing -
+3. **A ceiling derived from a scope.** `Scopes` is now read by exactly one thing -
    `crate::capability`, which decides which of this surface's *operations* a caller may invoke and
    decides nothing about which rows an answer contains. A per-caller *budget* still has no port to
    live behind, and `docs/adr/0013`'s raw tool is not built. See `caller` for the limit stated
    beside the claim.
-5. **Binding a gateway assertion to a request.** Added by review: in the `behind-gateway` mode the
+4. **Binding a gateway assertion to a request.** Added by review: in the `behind-gateway` mode the
    replay *window* is bounded - an `iat` is required and `exp - iat` is capped by a value this
    deployment chose - and inside that window an intercepted assertion replays. There is no nonce
    store and nothing hashes a method, a path or a body into the assertion. That is why nothing here
@@ -925,19 +948,25 @@ under the first lock is what keeps two concurrent misses from becoming two reads
 
 Where a key set is read from.
 
-One method, so a JWKS endpoint is a second implementor and nothing else in this file moves. See
-the module documentation for why the only implementor today reads a file.
+One method, so a JWKS endpoint is a second implementor and nothing else in this module moves. See
+`super`'s module documentation for why the only implementor today reads a file.
 
 **It returns the document's BYTES rather than a parsed key set**, and that is what lets
-`KeySetCache::poll_once` tell "changed" from "unchanged" the way `crate::tls::Renewal` does. A
+`super::KeySetCache::poll_once` tell "changed" from "unchanged" the way `crate::tls::Renewal` does. A
 comparison of parsed keys could not: the library's key type implements no equality, so the
 alternative was comparing key *ids*, which would miss a key whose material rotated under the same
 id.
 
-**Synchronous, deliberately.** The one implementor reads a small local file, at most once per
-`MAX_KEY_SET_AGE`, and making the trait `async` would either need a boxed future in the
-signature or force the file source to pretend. A URL source arrives with a real decision about
-where its I/O runs, and that decision belongs in the same change as the client.
+**Synchronous, deliberately**, and it runs on the blocking pool rather than on the executor -
+see `super::KeySetCache::look`. Making the trait `async` would either need a boxed future in the
+signature or force the file source to pretend; what it would not fix is that a synchronous read
+has to run somewhere, and where that is is the cache's decision rather than the source's.
+
+**Bounding the document is the IMPLEMENTOR's job and cannot be the cache's.** This returns an
+owned `String`, so an unbounded read has already allocated by the time anything above it could
+object. `MAX_KEY_SET_BYTES` is the number to check against, `FileKeySet` checks it, and
+nothing in this module makes a second implementor do the same - a type cannot express it, so this
+paragraph is the whole of the mechanism.
 
 ### `use KeySetUnavailable`
 
@@ -962,6 +991,12 @@ only ever wants to be *smaller*, so the cost is what sets it. One minute is one 
 minute per process, which is the same order as
 `crate::middleware::REAP_INTERVAL` and is nothing next to a signature verification.
 
+**What it bounds is the age of a SUCCESSFUL re-read, and the argument a reviewer should have with
+it is that one.** A read that fails and a document that is rejected both keep the previous keys
+verifying, so while refresh is unavailable this number bounds nothing.
+`KeySetCache::stale_for` is the measurement of that case; the module documentation is the
+argument for why nothing here refuses on it.
+
 ### `use MIN_REFETCH_INTERVAL`
 
 How long after one attempt to reach the source another may be made.
@@ -980,10 +1015,9 @@ Why a string is not a key identifier.
 
 What one look at the source did.
 
-The same three outcomes `crate::tls::Renewed` has, and for the same reasons: an unreadable source
-is not a change, and a candidate that was examined and rejected is recorded as examined so
-identical bytes on the next tick are silent rather than logging a rejection once per interval
-forever.
+Close to the outcomes `crate::tls::Renewed` has, and for the same reasons: a candidate that was
+examined and rejected is recorded as examined, so identical bytes on the next tick are silent
+rather than logging a rejection once per interval forever.
 
 ### `use MAX_TOKEN_BYTES`
 
@@ -1083,6 +1117,10 @@ Why a scope string is not one.
 - `TooLong`
 - `TooMany`
 - `NotAScopeToken` - A character RFC 6749's `scope-token` production does not allow.
+
+  The position and never the value, like every other refusal in this crate: a scope is caller
+  text, and the character classes that matter most here - a control character, an invisible one -
+  are exactly the ones that would print as nothing.
 
 ##### Implements
 
@@ -1255,11 +1293,12 @@ header.
 # What a refused request is told, and what it is not
 
 A `401` with an RFC 6750 `WWW-Authenticate` challenge naming the realm, which for a directly
-validating deployment is its own resource identifier. `docs/adr/0014` step 1 asks for *"a challenge
-naming where to look"*, and this is the half of that which exists: **the two metadata documents the
-record describes are not built**, so the challenge carries no `resource_metadata` parameter and a
-client learns the authorization server out of band. That is a named gap rather than a silent one -
-see `crate::inbound`.
+validating deployment is its own resource identifier. When an origin-form target and raw `Host`
+reproduce that exact resource, its `resource_metadata` parameter is the absolute URL of the public
+RFC 9728 document built from the same token requirement as the validator. It is omitted for any
+other request, because RFC 9728 section 3.3 requires a client to discard mismatched metadata. A
+gateway assertion arrives somewhere other than `Authorization: Bearer`, so that mode offers no
+Bearer challenge.
 
 What the response does **not** say is which check failed. The log says - through the `#[source]`
 chain on `TokenRejected` - and the caller does not, because "the signature verified and the
@@ -1283,7 +1322,7 @@ attach one a startup failure rather than an open door.
 ##### Methods
 
 ```rust
-pub fn challenge(&self) -> Option<String>
+pub fn challenge(&self, request_uri: &Uri, headers: &HeaderMap) -> Option<String>
 ```
 
 The RFC 6750 challenge a refused request carries, where one is meaningful.
@@ -1298,6 +1337,11 @@ read.
 **No `error_description`** in the direct case, and that is the same decision the response body
 makes: a description would have to say which check failed to be worth anything, and that is the
 one thing a caller must not learn.
+
+Both request parts are required because an origin-form target carries its path in the URI and
+its authority in the raw `Host` value. Absolute-form targets are not matched: `http::Uri`
+canonicalises standard schemes, so a match there would compare against a normalised spelling
+rather than the configured identifier's exact bytes.
 
 ```rust
 pub async fn describe_keys(&self) -> (usize, Vec<String>)
@@ -1408,6 +1452,9 @@ So there are two triggers and they answer different questions:
 | an unknown key id | "has a key been ADDED that I have not seen" | `MIN_REFETCH_INTERVAL`, because the trigger is caller-controlled |
 | age | "has a key been REMOVED" | `MAX_KEY_SET_AGE`, because the trigger is the clock and a caller cannot make it fire faster |
 
+The second row holds **while the source answers**, and not otherwise - see *the revocation bound
+excludes a failing refresh*, below.
+
 The age trigger fires from two places, deliberately. `KeySetCache::watch_until_shutdown` is a
 timer - the same shape `crate::tls::Renewal::watch_until_shutdown` already uses, spawned from the
 composition root inside the runtime - so revocation latency is bounded *whether or not this
@@ -1437,6 +1484,46 @@ reading the clock. That is what makes the interesting cases - a forged key id ar
 window, a key set going stale, and two callers arriving at the same instant - assertable without a
 sleep, which is the same reason `Renewal::poll_once` is public. **A concurrency bound proved by a
 sleep being long enough is worse than none**, and this file is the second attempt at this bound.
+
+# Where the read runs, and the three separate things that bound it
+
+`KeySetSource::read` is synchronous and the parse behind it is CPU work over a foreign
+document, and both used to run inline in `KeySetCache::poll_once` - on the async worker thread
+that was serving requests, reached from the timer as well as from a caller.
+`sutura_runtime::spawn_carrying_span` moves both onto the blocking pool. **That is not by itself
+a bound**, and the helper's own documentation says why: a started blocking task cannot be
+aborted, so a caller that gave up does not stop the read and runtime shutdown waits for it.
+Three different things bound three different growths:
+
+| What could grow | What bounds it | What that does not reach |
+| --- | --- | --- |
+| the bytes read, and the parse over them | `MAX_KEY_SET_BYTES`, inside the source | a second implementor's read - the port hands back a `String`, so by then the allocation happened |
+| how many looks start | one per window by `Cached::last_attempt`, and none while an `InFlight` exists - both decided in the acquisition that reserves | a read whose awaiter left keeps its pool thread until the source answers; nothing installs what it returns |
+| how long a caller waits for one | the deployment's own request timeout | nothing here: a second deadline beside a documented one is the defect, not the fix |
+
+# The revocation bound EXCLUDES a failing refresh, and there is no freshness ceiling
+
+`MAX_KEY_SET_AGE` bounds revocation *while the source answers with a document this deployment
+can use*. It does not bound it while refresh is failing: an unreadable source and a rejected
+document both leave the previous keys verifying, and `KeySetCache::reserve` stamps the
+**attempt** - which is what the rate limit needs and says nothing about freshness. So a source
+that stays unreadable, or that holds a document this deployment will not adopt, retains the
+cached signing keys for as long as it stays that way.
+
+**What that permits, and what it does not.** It permits continued trust in signing keys an
+earlier refresh established. It bypasses nothing else: a token still has to carry a signature one
+of those keys verifies, and still has to be inside its own expiry.
+
+**The measurement is here and there is no ceiling on it.** `Cached::last_success` and
+`KeySetCache::stale_for` are the instant a look last came back with a usable document, which is
+the number a freshness ceiling would have to be compared against - deliberately not the last
+attempt. Nothing refuses on it, because refusing is an availability-breaking policy - a sidecar
+part-way through rewriting a mounted file would take a deployment's whole authentication down
+with it - and no record in this repository has decided that a deployment should degrade that way
+rather than keep verifying. So the bound and its limit, in one sentence: **a removed key stops
+verifying within `MAX_KEY_SET_AGE` plus one read while refresh works, and after no bounded time
+while it does not** - the staleness is reported as `stale_for_ms` on every look that could not
+confirm the keys, and refused on by nothing.
 
 # What a key set is read from, and the gap that is named rather than hidden
 
@@ -1502,6 +1589,10 @@ Why a string is not a key identifier.
 - `TooLong`
 - `NotPrintable` - Anything outside printable ASCII.
 
+  The position and never the value, for the reason every refusal in this crate names a position:
+  a `kid` is caller-supplied, and echoing one into a message puts caller text into a log. A
+  newline in particular would append a line nobody wrote, in the record whose job is attribution.
+
 ##### Implements
 
 `Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
@@ -1519,12 +1610,36 @@ Why a document is not a usable key set.
 - `NotAJwkSet`
 - `NoUsableKey`
 - `KeyWithoutAnId` - A key with no `kid`.
+
+  Refused rather than skipped, and the difference matters: a key set whose keys have no ids
+  cannot be looked up by the id a token carries, so a deployment reading one would fall back to
+  "try every key" - which is what makes a rotation invisible and what makes an unknown key id
+  indistinguishable from a wrong signature.
 - `UnusableKeyId`
 - `DuplicateKeyId` - Two keys under one id.
+
+  **Refused rather than last-wins, which is what review found here.** A map insert made the last
+  entry silently displace the first, so a key set holding two keys under one `kid` decided which
+  one verifies by its position in a JSON array - and a rotation performed by *appending* the new
+  key under the old id would then work, while the same document written the other way round
+  would not. There is no reading of a JWK set in which two keys share an id on purpose.
 - `SymmetricKey` - A symmetric key.
+
+  **The second place algorithm confusion dies, and it is here rather than only in the pinned
+  algorithms because the two guard different halves.** A pinned list cannot name `HS256` - the
+  enum has no such variant - and a key set holding an `oct` key would still hand this library a
+  key of the HMAC family, whose *shared secret* is a value the issuer published. Both have to be
+  closed for the attack to be closed.
 - `UnsupportedKeyFamily`
 - `UnusableKey`
 - `NoKeyOfThePinnedFamily` - Not one key of the family the pinned algorithms need.
+
+  **The refusal review asked for, and the failure it prevents is a deployment that starts and
+  answers `401` to everybody.** The library verifies a token with one key and refuses a
+  permitted-algorithm list whose family disagrees with that key, so a key set of RSA keys under
+  `algorithms: ["ES256"]` cannot verify anything - and every request would be a `401` with
+  nothing in the log connecting the two. `sutura_config::InvalidAlgorithms::MixedFamilies`
+  refuses the same shape from the configuration side; this is the half that reads the keys.
 
 ##### Implements
 
@@ -1592,72 +1707,6 @@ outage. `docs/adr/0014`'s posture is fail-closed on the query path and this is t
 
 `Clone`, `Debug`
 
-#### `trait KeySetSource`
-
-```rust
-pub trait KeySetSource
-```
-
-Where a key set is read from.
-
-One method, so a JWKS endpoint is a second implementor and nothing else in this file moves. See
-the module documentation for why the only implementor today reads a file.
-
-**It returns the document's BYTES rather than a parsed key set**, and that is what lets
-`KeySetCache::poll_once` tell "changed" from "unchanged" the way `crate::tls::Renewal` does. A
-comparison of parsed keys could not: the library's key type implements no equality, so the
-alternative was comparing key *ids*, which would miss a key whose material rotated under the same
-id.
-
-**Synchronous, deliberately.** The one implementor reads a small local file, at most once per
-`MAX_KEY_SET_AGE`, and making the trait `async` would either need a boxed future in the
-signature or force the file source to pretend. A URL source arrives with a real decision about
-where its I/O runs, and that decision belongs in the same change as the client.
-
-#### `enum KeySetUnavailable`
-
-```rust
-pub enum KeySetUnavailable
-```
-
-The source could not be read, or what it returned is not a key set.
-
-##### Variants
-
-- `Unreadable`
-- `Invalid`
-
-##### Implements
-
-`Debug`, `Display`, `Error`
-
-#### `struct FileKeySet`
-
-```rust
-pub struct FileKeySet
-```
-
-A key set on the local filesystem.
-
-##### Methods
-
-```rust
-pub fn at(path: impl Into<PathBuf>) -> Self
-```
-
-Names the file. Does not read it: `Self::read` is the read, and the composition root reads
-once before the listener opens so an unreadable key set is a refusal to start.
-
-```rust
-pub fn path(&self) -> &Path
-```
-
-The path, for a startup log line.
-
-##### Implements
-
-`Clone`, `Debug`, `KeySetSource`
-
 #### `enum KeyUnavailable`
 
 ```rust
@@ -1673,6 +1722,12 @@ either a rotation this deployment has not caught up with or a caller guessing.
 ##### Variants
 
 - `RefetchRateLimited` - The id is not in the set, and it is too soon to look again.
+
+  **This is the rate limit firing, and it is a refusal rather than a wait.** Blocking the request
+  until the window opens would make the denial-of-service primitive a slow one instead of
+  removing it: N forged key ids would hold N request tasks. The caller is told it is
+  unauthenticated, which is true, and the retry window is on the log line rather than in the
+  response - a caller does not need to know when this deployment will next talk to its issuer.
 - `UnknownKeyId` - The id is not in the set after a fresh read.
 - `SourceUnavailable`
 
@@ -1688,17 +1743,34 @@ pub enum Refreshed
 
 What one look at the source did.
 
-The same three outcomes `crate::tls::Renewed` has, and for the same reasons: an unreadable source
-is not a change, and a candidate that was examined and rejected is recorded as examined so
-identical bytes on the next tick are silent rather than logging a rejection once per interval
-forever.
+Close to the outcomes `crate::tls::Renewed` has, and for the same reasons: a candidate that was
+examined and rejected is recorded as examined, so identical bytes on the next tick are silent
+rather than logging a rejection once per interval forever.
 
 ##### Variants
 
-- `Unchanged` - The document is byte-for-byte what is already in use, or it could not be read.
+- `Unchanged` - The document is byte-for-byte the one the last look examined.
+
+  **It does not mean the keys in use came from it.** A rejected candidate is recorded as
+  examined, so the look after one is `Unchanged` over bytes this deployment refused - which is
+  why the freshness stamp is decided by the candidate's own parse and not by this variant. See
+  `Self::Rejected`.
+- `Unavailable` - **The source could not be looked at**, or the look did not finish.
+
+  A variant of its own rather than folded into `Self::Unchanged`, which is what it used to
+  be - and that fold is half of why the revocation bound excluded a failing refresh. *"The
+  source says these are still the keys"* and *"the source said nothing"* are the same fact
+  about the keys and opposite facts about freshness; only the first one stamps
+  `Cached::last_success`.
 - `Rotated` - A new document parsed, held a key of the pinned family, and is now in use.
 - `Rejected` - A new document was read and is NOT usable. The previous key set keeps verifying.
 - `NotDue` - **The source was not looked at**, because the window has not opened or another caller already reserved this look.
+
+  A fourth variant rather than folding into `Self::Unchanged`, and the distinction is the whole
+  point of the guard it reports: "the document did not change" is a fact about the source, and
+  "nobody looked" is a fact about this deployment. Collapsing them would make the bound that
+  `KeySetCache::reserve` enforces unobservable, and a bound nothing can observe is one nothing
+  can test - which is how the concurrent case got past the first round.
 
 ##### Implements
 
@@ -1744,9 +1816,11 @@ a look at the source actually happens is decided once, atomically, inside `poll_
 not wait. It answers from whatever is cached, which during a rotation may be an
 `KeyUnavailable::UnknownKeyId` for a key the winner is about to install, or - on the age path -
 one more use of a key the winner is about to remove. So revocation is bounded by
-`MAX_KEY_SET_AGE` plus the duration of one source read, and a rotation can cost a concurrent
-caller one `401` it can retry. Making it wait instead would put N request tasks behind one file
-read, which is the primitive this whole file is arranged against.
+`MAX_KEY_SET_AGE` plus the duration of one source read **while the source keeps answering
+with a usable document, and by nothing while refresh is failing** - see the module
+documentation for what that permits and for why there is no ceiling. A rotation can
+cost a concurrent caller one `401` it can retry. Making it wait instead would put N request
+tasks behind one file read, which is the primitive this whole file is arranged against.
 
 ```rust
 pub async fn poll_once(&self, now: Instant) -> Refreshed
@@ -1783,6 +1857,18 @@ rate limit would keep it that way for thirty seconds at a time. It also fails wh
 holds no key of the pinned family - see `InvalidKeySet::NoKeyOfThePinnedFamily`.
 
 ```rust
+pub async fn stale_for(&self, now: Instant) -> Duration
+```
+
+How long since a look at the source last came back with a document this deployment could use.
+
+**A measurement and not a policy**: nothing here refuses on it, and the module documentation
+states the bound and its limit together. It is the number a freshness ceiling
+would be compared against, and it is deliberately not the last *attempt* - a reservation
+stamps the attempt before the read, so a source that has failed every time for an hour
+reports an attempt one window old and a success an hour old.
+
+```rust
 pub fn watch_until_shutdown(cache: &Arc<Self>, interval: Duration, shutdown: Shutdown)
 ```
 
@@ -1800,6 +1886,53 @@ anyway. What the timer adds is a bound that holds while nothing is being asked.
 ##### Implements
 
 `Debug`
+
+#### `use FileKeySet`
+
+A key set on the local filesystem.
+
+#### `use KeySetSource`
+
+Where a key set is read from.
+
+One method, so a JWKS endpoint is a second implementor and nothing else in this module moves. See
+`super`'s module documentation for why the only implementor today reads a file.
+
+**It returns the document's BYTES rather than a parsed key set**, and that is what lets
+`super::KeySetCache::poll_once` tell "changed" from "unchanged" the way `crate::tls::Renewal` does. A
+comparison of parsed keys could not: the library's key type implements no equality, so the
+alternative was comparing key *ids*, which would miss a key whose material rotated under the same
+id.
+
+**Synchronous, deliberately**, and it runs on the blocking pool rather than on the executor -
+see `super::KeySetCache::look`. Making the trait `async` would either need a boxed future in the
+signature or force the file source to pretend; what it would not fix is that a synchronous read
+has to run somewhere, and where that is is the cache's decision rather than the source's.
+
+**Bounding the document is the IMPLEMENTOR's job and cannot be the cache's.** This returns an
+owned `String`, so an unbounded read has already allocated by the time anything above it could
+object. `MAX_KEY_SET_BYTES` is the number to check against, `FileKeySet` checks it, and
+nothing in this module makes a second implementor do the same - a type cannot express it, so this
+paragraph is the whole of the mechanism.
+
+#### `use KeySetUnavailable`
+
+The source could not be read, or what it returned is not a key set.
+
+#### `use MAX_KEY_SET_BYTES`
+
+The largest key set document a source may hand back.
+
+**The bound at the edge**, and the edge is where it has to be: a document is read into memory and
+then parsed, so an unbounded one is work proportional to whatever happens to be at the path -
+which is a denial-of-service primitive whatever else it is. Sixty-four kilobytes is two orders of
+magnitude above a JWK set holding a handful of keys, and small enough that one read and one parse
+are bounded work.
+
+**It bounds an implementor and cannot bound the port.** `KeySetSource::read` hands back a
+`String`, so by the time `super::KeySetCache` sees a document the allocation has already happened.
+`FileKeySet` checks it; a second implementor carries its own check against this constant, and
+nothing in this module can make it.
 
 #### `constant MIN_REFETCH_INTERVAL`
 
@@ -1821,6 +1954,12 @@ rather than a key for the same reason the limit above is one - and unlike that l
 only ever wants to be *smaller*, so the cost is what sets it. One minute is one small read per
 minute per process, which is the same order as
 `crate::middleware::REAP_INTERVAL` and is nothing next to a signature verification.
+
+**What it bounds is the age of a SUCCESSFUL re-read, and the argument a reviewer should have with
+it is that one.** A read that fails and a document that is rejected both keep the previous keys
+verifying, so while refresh is unavailable this number bounds nothing.
+`KeySetCache::stale_for` is the measurement of that case; the module documentation is the
+argument for why nothing here refuses on it.
 
 ### Module `token`
 
@@ -1899,21 +2038,59 @@ and an error is not a place for credential material.
 ##### Variants
 
 - `Absent` - No token where this deployment reads one.
+
+  Its own variant rather than folded into a malformed token, because the two mean different
+  things to whoever is debugging: one is a client that has not been configured, the other is a
+  client whose token is wrong.
 - `NotABearerToken` - A header with some other authentication scheme.
+
+  **Its own variant because it used to be `Self::Absent`, and that was the wrong diagnostic.** A
+  client sending `Basic` or `Negotiate` here is a client configured for a different service, and a
+  log saying nothing was presented sends whoever reads it looking for a missing header. The scheme
+  itself is not rendered: it is caller text.
 - `TooLong`
 - `UnreadableHeader` - The header is not a JWT header, or names no key.
 - `NoKeyId` - No `kid`.
+
+  Required rather than optional, and that is a decision: a token with no key id can only be
+  verified by trying every key in the set, which makes an unknown key indistinguishable from a
+  bad signature and makes rotation invisible. Every authorization server that publishes a key set
+  sets it.
 - `UnusableKeyId`
 - `NoKey`
 - `NotVerified` - The signature, the expiry, the issuer, the audience - or the claims failing to deserialize.
+
+  **All four crypto failures in one variant, and that is deliberate rather than lazy.** The
+  library reports which, and it goes to the log through the inner `#[source]`; what must not
+  happen is a *response* that distinguishes them, because "the signature is fine and the
+  audience is wrong" tells a caller which half of a forgery to fix. A caller is told it is
+  unauthenticated. The claims-not-deserializing case is split out as `NotVerified::Json`,
+  because a serde message embeds the raw claim value - see that variant for why it carries no
+  `#[source]`.
 - `UnusableSubject` - A `sub` this workspace will not write into a record.
 - `UnusableActor`
 - `TooManyActors` - More nesting in `act` than `MAX_ACTORS` allows.
 - `UnusableScope`
 - `WrongTokenType` - The token is of a class this deployment does not accept.
+
+  **The refusal that closes cross-JWT substitution.** It carries the required type - a configured
+  value, so safe to render - and the presented one only when that presented value **passed
+  `TokenType::parse`**, which bounds its length and its character set. A `typ` is caller-adjacent
+  text, so the rule about not putting caller text in a message applies; a value that has been
+  through a parse is the workspace's own answer to that, the same way a `KeyId` is.
 - `NoIssuedAt` - A transit proof with no `iat`.
+
+  Its own variant rather than folded into `Self::NotVerified`, because the library cannot
+  require `iat` - `required_spec_claims` honours `exp`, `nbf`, `aud`, `iss` and `sub` and nothing
+  else - so this is a check of ours and a reader should be able to tell. Only the
+  `behind-gateway` mode requires it: without an `iat` there is no lifetime to bound, and the
+  lifetime is the only thing standing between an intercepted assertion and an unbounded replay.
 - `LifetimeTooLong` - A transit proof declaring a longer life than this deployment will call short-lived.
 - `IssuedInTheFuture` - An `iat` in the future by more than the leeway.
+
+  A separate refusal from an expiry, because it says something different: a proof issued in the
+  future is a clock that disagrees or a claim somebody wrote, and either way the lifetime bound
+  above cannot be trusted to mean what it says.
 
 ##### Implements
 
@@ -1932,7 +2109,15 @@ The split exists because one of the two halves carries a message a log must not 
 ##### Variants
 
 - `Crypto` - The signature, the expiry, the issuer or the audience.
+
+  The library's message for these is a fixed sentence - no claim value names itself - so it is
+  safe to let it reach an operator's log through `#[source]`.
 - `Json` - The claims in the presented token did not deserialize.
+
+  Deliberately no `#[source]`: a serde message embeds the raw claim value, which is
+  caller-chosen text a log must not carry. The failure is named without the text that caused
+  it - the same rule that keeps a rejected filter value out of a message, applied to the one
+  place a claim value could have reached a log.
 
 ##### Implements
 
@@ -2372,7 +2557,7 @@ a configured limit in a log and in a review, and it is not one.
 ### `fn enforce_timeout`
 
 ```rust
-pub async fn enforce_timeout(__arg0: axum::extract::State<std::time::Duration>, request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response
+pub async fn enforce_timeout(__arg0: axum::extract::State<sutura_config::RequestTimeout>, request: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response
 ```
 
 Gives up on a request that outran the configured bound, with the documented body.
@@ -2387,6 +2572,12 @@ constructed. Ten lines here is the whole cost of the response shape being one sh
 It bounds *the response*, which is what a caller experiences, and not the work: a question
 already handed to the blocking pool keeps running until the data system answers it. Cancelling
 that needs a cancellation token the `Warehouse` port does not have.
+
+**Also where the port's `Deadline` is opened**, at the instant this layer is reached - before
+admission, so the wait for a concurrency slot sits inside the caller's own bound rather than
+adds to it (`docs/adr/0029`). Inserted as a request extension, which is what lets the route
+handler read it with no state of its own to thread it through: `crate::inbound::VerifiedCaller`
+reaches the handler the same way, for the same reason.
 
 ### `type_alias RateLimit`
 
@@ -2465,7 +2656,7 @@ or a request body; anything reachable from one of them is pulled in by the deriv
 ### `fn document`
 
 ```rust
-pub fn document() -> utoipa::openapi::OpenApi
+pub fn document(run_sql_enabled: bool) -> utoipa::openapi::OpenApi
 ```
 
 The whole document: the derived shell plus one fragment per version.
@@ -2473,10 +2664,27 @@ The whole document: the derived shell plus one fragment per version.
 A `v2` adds one line here and nothing else, which is what makes versioning additive: the
 fragment carries its own absolute paths because the prefix is applied by the `nest` below.
 
+**It describes the GOVERNED operations and nothing else.** Liveness is mounted on its own
+router (`crate::router`) and deliberately left out: it is a property of the process rather than
+an operation of the API (`crate::constants::HEALTH_PATH` says so), and every operation this
+document lists becomes a tool a client such as a chat interface may offer its model. A probe in
+that list is a tool nothing should call. The set is exhaustive in both directions - a route the
+document describes that `crate::capability::governed` does not name, and a governed route it
+omits, are each a failure (`tests/operations.rs`).
+
+**`run_sql_enabled` decides whether `/sql/run` is in the set at all.** The same absence
+`sutura_mcp`'s `tools/list` gives a deployment that never turned the raw tool on: a route this
+deployment answers `403` for every caller of, forever, is not a "governed operation" in the
+sense this document's own header claims - it is a switch nobody may use, and listing it invites
+a client generator to build a call nothing here will ever accept. The path is removed from the
+assembled document rather than never merged, because `#[utoipa::path]` has no per-deployment
+condition to attach to - the generator's own output is unconditional, and this is the one place
+the deployment's own setting can still act on it.
+
 ### `fn document_json`
 
 ```rust
-pub fn document_json() -> Result<String, serde_json::Error>
+pub fn document_json(run_sql_enabled: bool) -> Result<String, serde_json::Error>
 ```
 
 The document as JSON.
@@ -2503,8 +2711,9 @@ and that is the deliberate choice rather than a leftover: a refusal keeps
 `crate::wire::OutcomeBody::Refusal` with its `outcome` discriminator, and a failure keeps
 `ProblemBody`. `outcome` is the one-field test for which arrived, which matters most exactly
 where a status is shared - `503` is `unavailable` or `at_capacity` from here, and
-`source_unavailable` from there; `413` is a request body over the limit from here, and an answer
-over the row cap from there.
+`source_unavailable` from there; `413` is a request body over the limit from here, and too much
+data to certify an answer from there - the row cap, a data system that will not hand a result
+back in one piece, or this deployment's own ceiling on the bytes a rendered answer may occupy.
 
 **A refusal is not routed through `Failure`, and must not be.** `Failure` is what an `Err`
 becomes, and `ToolOutcome::Refusal` is a domain *result*: a `Failure::Refused` variant would put a
@@ -2533,15 +2742,76 @@ come from the variant, so two handlers cannot answer the same situation with dif
 #### Variants
 
 - `Unauthorized` - A credential is required and was absent, malformed or wrong.
+
+  One variant for all three, deliberately: telling a caller which of the three they got wrong
+  is telling them whether the secret they tried was close.
 - `InsufficientScope` - The caller is authenticated and was not granted the capability this route needs.
+
+  **`403` and not `401`, and the difference is the whole point.** A `401` says *present a
+  credential*; this says *the credential you presented is valid and does not carry this*. A
+  client told `401` re-authenticates and gets the same token back, forever.
+
+  **It names the scope, which is the one place in this module a refusal is deliberately more
+  informative than the others**, and RFC 6750 section 3.1 is why: `insufficient_scope` is defined
+  to carry the scope required, because the caller here is a client an operator configured and the
+  fix is a grant at an authorization server. Without it, a deployment that switched
+  `security.inbound` on before authoring scopes gets an empty tool list and a `403` with nothing
+  to act on. The scope strings are `sutura_app::Capability::scope`'s own literals - published, and
+  the same for every deployment - so this leaks a capability's existence and nothing about *this*
+  deployment.
+
+  `&'static str` rather than a `String`: the value can only be a capability's own literal, and a
+  type that could hold caller text is a type somebody reflects caller text through.
+- `ToolNotEnabled` - The capability exists on this surface, but this DEPLOYMENT never turned it on - distinct from `Self::InsufficientScope`, where the caller's own credential is what is missing.
+
+  **`403`, the same status, a different code and sentence.** `docs/adr/0013`'s off-by-default
+  raw SQL tool is the first capability this applies to: a caller told `insufficient_scope`
+  for a route no scope can turn on would go obtain a grant that could never help. Checked
+  BEFORE the scope, in `crate::capability::require_capability` - the deployment's own switch
+  is the reason a caller with every scope this surface issues still cannot reach the route.
 - `NotAQuestion` - The body is not a question. Carries a message naming the field.
+
+  **The one `String` in this enum, two lines under the rule that warns about one**, so the
+  reason is here rather than left as an exception a reader has to reconstruct. `detail` is not
+  free-form: it is `describe()`'s walk of one
+  `sutura_domain::question::MalformedQuestion`'s cause chain, and that type's own note is
+  where the property this relies on is stated and asserted - no variant of it, and no link of
+  any variant's chain, carries the caller's own value. So this holds a rendered sentence about
+  which field was wrong, never the field's contents. A cause chain that started carrying them
+  again would reach a caller through here, which is why the assertion lives beside the chain
+  and not beside this variant.
 - `TooLarge` - The body is larger than the configured bound.
+
+  Separate from `Self::NotAQuestion` even though both arrive as the same extractor
+  rejection: a caller who sent something too big has a different thing to fix than one who
+  sent the wrong shape, and only the status tells them which.
 - `RateLimited` - Too many requests from this address, too quickly.
 - `Timeout` - The request took longer than the configured bound.
 - `Internal` - Something on our side went wrong. Carries nothing.
 - `Unavailable` - The data system did not answer. Distinguished from `Self::Internal` because it is the one failure that is worth retrying, and a caller cannot tell from a 500.
 - `IdentityUnavailable` - The credential broker did not answer, so nothing could be executed as the asking subject.
+
+  **Shares the status with `Self::Unavailable` and not the code.** Both are worth retrying, and
+  the two are diagnosed in different places: one is a data system that is unwell and this is the
+  authorization server the identity path depends on. `docs/adr/0014` states the requirement that
+  the two stay distinguishable - a caller told the same sentence for both retries an outage that
+  will clear the same way it retries one that will not.
+
+  Carries nothing. Which issuer this deployment talks to is not the caller's business.
 - `AtCapacity` - Every execution slot was taken for the whole admission window, so the question was shed.
+
+  **`503` and not `429`, and the two say different things.** A `429` is "you personally asked
+  too often", which is a claim about the caller - and the rate limiter already makes it, keyed
+  on an address. This is "the service has no capacity right now", which is a claim about the
+  deployment and is true whoever asked. A caller inside their own rate limit can reach this,
+  and telling them to slow down would be advice they cannot act on.
+
+  Shares the status with `Self::Unavailable` and not the code, because the two are retried
+  the same way and diagnosed differently: one is a data system that is unwell, the other is
+  this service being full. `code` is what a client branches on, and the pair of them is why
+  the code exists at all.
+
+  Carries how long to wait, already known: the admission window just spent waiting it out.
 
 #### Implements
 
@@ -2576,12 +2846,13 @@ Assembling the router: three tiers, and what guards each.
 
 | Tier | Reachable by | Rate limit | Token |
 | --- | --- | --- | --- |
-| liveness | anybody who can route a packet | public | no |
+| liveness and direct protected-resource discovery | anybody who can route a packet | public | no |
 | documentation | anybody, when it is served at all | public | yes, when one is configured |
 | `v1` | a caller with the token, when one is configured | general | yes, when one is configured |
 
 Liveness has no token because a probe has no credential to present, which is exactly why its
-body carries nothing.
+body carries nothing. Protected-resource metadata has no token because it tells a direct-mode
+client where authorization happens; its two configured fields are the whole public document.
 
 # Layer order, and why it reads backwards
 
@@ -2618,8 +2889,9 @@ under the version prefix without also applying to the liveness probe merged in b
 **The consequence, stated rather than discovered later:** a path under the version prefix that
 matches no route skips the gate and falls through to the top-level `404`. So an unauthenticated
 caller can learn which paths exist, though not what is behind them - and the paths are in the
-published interface description anyway. Every path that resolves to a handler does hold a
-credential. There is a test on each half of that.
+published interface description anyway. Apart from liveness and the direct-only protected-resource
+document, every path that resolves to a handler does hold a credential when one is configured.
+There is a test on each half of that.
 
 # Why this returns a `Result`
 
@@ -2641,8 +2913,29 @@ Why the router could not be assembled.
 
 - `Limiter`
 - `Reaper` - The housekeeping thread for the limiter's keyed state would not start.
+
+  A refusal and not a warning, for the reason every refusal in this codebase is one: the
+  alternative is a process that runs with a keyed store nothing ever sweeps, which is a slow
+  leak that no request will ever reveal.
 - `InboundIdentityNotAttached` - The settings declare an inbound identity and the state carries no gate to establish it.
+
+  **The mechanism that makes attaching leg 1 unforgettable.** `crate::inbound::InboundGate` is
+  built by the composition root, because building it reads a key set - so there is a state in
+  which a deployment has declared `security.inbound` and nothing is verifying anything. Without
+  this refusal that deployment would serve, answer every question as
+  `sutura_domain::identity::Subject::TheDeploymentItself`, and log a startup line saying it
+  establishes a caller identity. It fails to assemble instead.
 - `RouteNotGoverned` - A route under the version prefix that `crate::capability::governed` names no capability for.
+
+  **The mechanism that makes the capability gate unforgettable**, and it is deliberately a
+  refusal to assemble rather than a refusal at request time. The gate is a layer, so a handler
+  cannot forget to call it; what is left to forget is a row in the table, and a route with no row
+  would either be refused to every caller or - if the layer fell open - be reachable by every
+  caller. Neither is something to discover from a request.
+
+  It reads the generated interface description, which is generated from the handlers' own
+  `#[utoipa::path]` attributes - so it is checked against the routes the router actually mounts
+  and not against a second list somebody kept in step.
 
 #### Implements
 
@@ -2753,6 +3046,10 @@ Why the server stopped, other than being asked to.
 - `Bind`
 - `Serve`
 - `Tls` - The configured certificate and key are not usable.
+
+  Returned before the socket is bound, which is the property that matters: TLS was asked for
+  and could not be established, so there is no listener at all rather than a plaintext one on
+  a port somebody configured to be encrypted.
 
 #### Implements
 
@@ -3053,10 +3350,24 @@ is bound.
 - `Unreadable` - The file could not be read at all: absent, or not readable by this process.
 - `NoCertificate` - The file was read and held no PEM certificate.
 - `NoKey` - The file was read and held no PEM private key.
+
+  Also what a key file that is not UTF-8 is reported as, and that is not a widened meaning: PEM
+  is ASCII-armoured by definition, so bytes that are not text are not a PEM private key.
 - `TooLarge` - The file is larger than any certificate chain or private key is.
+
+  See `MAX_MATERIAL_BYTES`. The refusal names the cap rather than the size found, because the
+  size found is one byte past the cap and nothing else is known about the file.
 - `Malformed` - A PEM block was found and did not parse.
 - `KeyDoesNotMatch` - The key does not belong to the certificate.
+
+  **The variant this whole module is careful about.** rustls will build a `ServerConfig` from a
+  mismatched pair without complaint; what fails is every handshake, at the client, with a
+  signature error that says nothing about a configuration file. Checked here so it is a startup
+  refusal - or, on a reload, a rejected candidate and a listener that keeps working.
 - `NotConfigurable` - The server configuration itself would not build.
+
+  Unreachable from a pair that got this far, and an error rather than a panic for the reason
+  `crate::middleware::LimiterNotBuilt` is one.
 
 #### Implements
 
@@ -3297,32 +3608,6 @@ One equality filter.
 
 `ComposeSchema`, `Debug`, `Deserialize<'de>`, `ToSchema`
 
-### `enum MalformedQuestion`
-
-```rust
-pub enum MalformedQuestion
-```
-
-Why a body is not a question.
-
-Every variant names the field, and none of them echoes the caller's value back except where the
-value is the thing that failed to parse as an identifier - which is a bounded character set, not
-free text.
-
-#### Variants
-
-- `Metric`
-- `Grain`
-- `Date`
-- `Range`
-- `Dimension`
-- `FilterDimension`
-- `FilterValue` - The value is not one a catalog could have declared: nothing, more than one line, a control character, an invisible or direction-changing code point, spacing a reader cannot see, or longer than `sutura_domain::catalog::MAX_DIMENSION_VALUE_CHARS`.
-
-#### Implements
-
-`Debug`, `Display`, `Error`
-
 ### `enum OutcomeBody`
 
 ```rust
@@ -3530,3 +3815,143 @@ One dimension of one metric.
 #### Implements
 
 `ComposeSchema`, `Debug`, `Serialize`, `ToSchema`
+
+### `type_alias MalformedQuestion`
+
+Why a body is not a question.
+
+**Owned by `sutura-domain::question`, not by this transport.** HTTP's and MCP's field sets and
+typed refusals were identical - kept equal only by review - so the parse moved inward of both;
+this alias is what every existing reference to `crate::wire::MalformedQuestion` in this crate
+keeps meaning.
+
+### `use RawMalformedStatement`
+
+Why a `run_sql` request body was not a statement.
+
+### `use RawOutcomeBody`
+
+What running a raw statement produced.
+
+Tagged so it cannot be mistaken for a certified answer's `super::OutcomeBody` - see the module
+documentation.
+
+**The variant NAMES carry no `Raw` prefix** (`clippy::enum_variant_names` over this
+already-`Raw`-prefixed type) - only their serialized tags do, pinned by an explicit
+`#[serde(rename)]` on each: `Refusal` alone would serialize exactly the certified path's own
+`outcome: "refusal"`, the one collision `docs/adr/0013` forbids.
+
+### `use RunSqlBody`
+
+One raw statement, as the request body.
+
+### `use RunSqlOutcome`
+
+A raw outcome, and the status the transport says it with.
+
+`super::Outcome`'s shape, over `RawOutcome` instead of a certified
+`sutura_domain::query::ToolOutcome`.
+
+### Module `raw`
+
+The raw SQL tool's own wire shape, kept apart from every certified shape above for the reason
+its own module documentation gives.
+The raw SQL tool's wire shape: what `POST /v1/sql/run` takes, and what it answers.
+
+Its own module for the reason `wire/refusal.rs` has one: a seam the thousand-line limit on
+`wire.rs` does not have room for.
+
+It shares the discriminator's NAME (`outcome`), the `columns`/`rows` keys a row-carrying body
+needs whichever tool produced it, and the same content-negotiation `axum::Json` gives every
+response here - never the discriminator's VALUE, and never a provenance-shaped key. See below.
+
+# The discriminant, restated for this transport
+
+`docs/adr/0013` requires no shared discriminant VALUE and no provenance-shaped key with a
+certified answer's - WEAKER than "no field name in common": `columns` and `rows` are the same
+two keys on both bodies, because both carry rows and need the same two labels for them.
+
+`RawOutcomeBody` tags `outcome: "raw_rows"` / `outcome: "raw_refusal"` - never `"answer"` or
+`"refusal"` - and carries no `provenance` or `definition_digest` key at any depth, matching
+`sutura_mcp::wire::raw::RawContent`'s shape on the other transport.
+
+The two are kept equal by review, the same limit `super::OutcomeBody`'s own module
+documentation states for the certified pair.
+
+#### `struct RunSqlBody`
+
+```rust
+pub struct RunSqlBody
+```
+
+One raw statement, as the request body.
+
+##### Implements
+
+`ComposeSchema`, `Debug`, `Deserialize<'de>`, `ToSchema`
+
+#### `enum MalformedStatement`
+
+```rust
+pub enum MalformedStatement
+```
+
+Why a `run_sql` request body was not a statement.
+
+##### Variants
+
+- `Statement`
+
+##### Implements
+
+`Debug`, `Display`, `Error`
+
+#### `enum RawOutcomeBody`
+
+```rust
+pub enum RawOutcomeBody
+```
+
+What running a raw statement produced.
+
+Tagged so it cannot be mistaken for a certified answer's `super::OutcomeBody` - see the module
+documentation.
+
+**The variant NAMES carry no `Raw` prefix** (`clippy::enum_variant_names` over this
+already-`Raw`-prefixed type) - only their serialized tags do, pinned by an explicit
+`#[serde(rename)]` on each: `Refusal` alone would serialize exactly the certified path's own
+`outcome: "refusal"`, the one collision `docs/adr/0013` forbids.
+
+##### Variants
+
+- `Rows`
+- `Refusal`
+
+##### Implements
+
+`ComposeSchema`, `Debug`, `Serialize`, `ToSchema`
+
+#### `struct RunSqlOutcome`
+
+```rust
+pub struct RunSqlOutcome
+```
+
+A raw outcome, and the status the transport says it with.
+
+`super::Outcome`'s shape, over `RawOutcome` instead of a certified
+`sutura_domain::query::ToolOutcome`.
+
+##### Methods
+
+```rust
+pub const fn body(&self) -> &RawOutcomeBody
+```
+
+```rust
+pub const fn status(&self) -> StatusCode
+```
+
+##### Implements
+
+`Debug`, `IntoResponse`

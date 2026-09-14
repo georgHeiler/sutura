@@ -1,6 +1,6 @@
 //! What both acceptance legs need from the environment, and how the adapter is opened over it.
 //!
-//! **One module rather than two copies, for `crates/sutura-app/tests/adapters/mod.rs`'s own reason:**
+//! **One module rather than two copies, for `crates/sutura-app/tests/adapters/adapters.rs`'s own reason:**
 //! two copies of "open this data system over the developer's project" is two things to keep in step,
 //! and the bound the [`bounds`] function sets is the one path in this repository that spends real
 //! money. A second copy that drifted by a digit would be a leg that bills differently from the one a
@@ -41,12 +41,12 @@ pub(crate) type Wired<C = Credential> = BigQueryWarehouse<BigQueryWire<C>>;
 
 /// What every job either leg submits is bounded by.
 ///
-/// **The deadline is DERIVED from `server.request_timeout_seconds` rather than copied from it**,
-/// which is the correction review forced on the smoke leg. Thirty seconds is the shipped default, and
-/// thirty seconds is NOT what one call may spend: one answer calls the port twice and each call pays
-/// connection setup on top of its own budget, so the number a caller wants is the share -
-/// `QueryDeadline::within_request_timeout` does that arithmetic once, here and in whichever
-/// composition root links this crate.
+/// **The deadline is the shipped `server.request_timeout_seconds` directly, since `docs/adr/0029`
+/// retired the arithmetic that used to divide it.** These legs call `Warehouse::dry_run`/`execute`
+/// with a real port `Deadline` of their own (`deadline()`, below), so it is THAT the job's
+/// `timeoutMs`/`jobTimeoutMs` derive from - what this `JobBounds` still bounds is the socket ceiling
+/// every call is pinned to as a backstop, which is why it stays sized to the whole configured value
+/// rather than a share of it.
 ///
 /// **1 GiB because these legs are the one path that spends real money.** A developer or a CI job
 /// pointed at a partitioned table with years of history gets `bytesBilledLimitExceeded` from the
@@ -60,7 +60,7 @@ pub(crate) type Wired<C = Credential> = BigQueryWarehouse<BigQueryWire<C>>;
 /// something large under one of the four fixture names.
 pub(crate) fn bounds() -> JobBounds {
     JobBounds::of(
-        QueryDeadline::within_request_timeout(30).expect("the shipped request timeout leaves a budget"),
+        QueryDeadline::parse(30).expect("thirty seconds is a deadline"),
         BytesBilledCeiling::parse(1024 * 1024 * 1024).expect("a gibibyte is a ceiling"),
     )
 }

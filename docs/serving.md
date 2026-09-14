@@ -109,7 +109,7 @@ is refused at startup.
 security:
   inbound:
     mode: "direct"
-    resource: "https://sutura.example.com"
+    resource: "https://sutura.example.com/v1/query"
     authorization_server: "https://issuer.example.com" # the `iss` value, exactly
     key_set_file: "/etc/sutura/keys/jwks.json"
     algorithms: ["RS256"]
@@ -168,9 +168,24 @@ What the checks are, in both modes:
 | `scope`                         | Parsed, bounded, and **read** - it decides which of this surface's operations the caller may invoke. See *What a scope grants* below. A per-caller ceiling derived from a scope is still not built                                                                                                                                                                                                                                                                                                                                           |
 
 A refused request in the `direct` mode gets `401` with a `WWW-Authenticate: Bearer
-realm="<your resource identifier>", error="invalid_token"`. It deliberately does **not** say which
-check failed: "the signature verified and the audience did not" tells a caller which half of a forgery
-to fix. The log says, in the cause chain, where an operator can read it.
+realm="<your resource identifier>", error="invalid_token"`. When an origin-form request's raw `Host`
+and request target reproduce the exact configured resource identifier, the challenge also carries
+`resource_metadata="<absolute metadata URL>"`. RFC 9728 requires clients to discard metadata naming
+any other resource, so the parameter is absent for every other spelling. Absolute-form request
+targets are not matched either: the HTTP URI parser canonicalises standard schemes, so a match there
+would compare against a normalised spelling rather than the byte-exact one configured. The challenge
+deliberately does **not** say which check
+failed: "the signature verified and the audience did not" tells a caller which half of a forgery to
+fix. The log says, in the cause chain, where an operator can read it.
+
+The metadata URL is public and needs no token. It serves RFC 9728 JSON whose `resource` is the exact
+configured resource identifier and whose one `authorization_servers` entry is the exact configured
+issuer. For `https://sutura.example.com/v1/query`, the route is
+`GET /.well-known/oauth-protected-resource/v1/query`; a resource with no path uses
+`GET /.well-known/oauth-protected-resource` for direct discovery, but that root document cannot be
+advertised from a child path. It is outside `/v1` and capability authorization, uses the probe rate
+limit, and exists only in `direct` mode. Authorization-server metadata remains the authorization
+server's document, not one served here.
 
 **In `behind-gateway` there is no challenge**, and that is deliberate rather than missing: the caller
 holds no bearer token for this resource, so an instruction to present one is one it cannot follow - and
@@ -178,10 +193,10 @@ a client that followed it would start putting credentials in a header this deplo
 
 **Rotation and revocation are two questions, and they have two answers.**
 
-| Question                   | What triggers a re-read                        | The bound                                                                                                                                                                                                                                                                                                                                                                                 |
-| -------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| has a key been **added**   | a token naming a `kid` the cache does not hold | at most one read per thirty seconds, **however many requests arrive at once**: the window is compared and reserved in one lock acquisition, so concurrent callers with forged key ids share the one read rather than getting one each. Without that bound a forged key id turns every request into a re-read, which is a denial-of-service primitive aimed at whatever serves the key set |
-| has a key been **removed** | age: the cached set is re-read once a minute   | one minute. This is the one the caller cannot influence, and it is the one that matters for revocation - a caller presenting a revoked key presents an id the cache *has*, so nothing else would ever trigger                                                                                                                                                                             |
+| Question                   | What triggers a re-read                        | The bound                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| has a key been **added**   | a token naming a `kid` the cache does not hold | at most one read per thirty seconds, **however many requests arrive at once**: the window is compared and reserved in one lock acquisition, so concurrent callers with forged key ids share the one read rather than getting one each. Without that bound a forged key id turns every request into a re-read, which is a denial-of-service primitive aimed at whatever serves the key set                                         |
+| has a key been **removed** | age: the cached set is re-read once a minute   | one minute **while the source keeps answering with a usable document**, and no bounded time while it does not: a failing re-read keeps the previous keys verifying and logs `stale_for_ms`, and nothing refuses on that number. This is the one the caller cannot influence, and it is the one that matters for revocation - a caller presenting a revoked key presents an id the cache *has*, so nothing else would ever trigger |
 
 The age re-read happens on a timer *and* on the first request past the horizon, so a deployment gets
 the bound whether or not it is serving traffic. A candidate that will not parse, or that holds no key
@@ -239,20 +254,20 @@ bound that surface exactly as they bound this one.
 
 ## The endpoints
 
-| Method and path     | Token                                                                               | What it is                                                                                                                                                                                                                              |
-| ------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /health`       | no                                                                                  | Liveness. The body is exactly `{"status":"ok"}`                                                                                                                                                                                         |
-| `GET /v1/catalog`   | yes, when one is configured; plus `sutura:catalog.read` where `security.inbound` is | The metrics this catalog defines, with grains, dimensions and the values a filter may use                                                                                                                                               |
-| `POST /v1/query`    | yes, when one is configured; plus `sutura:metrics.ask` where `security.inbound` is  | One certified question. `200` only when it was answered; a refusal carries its own status - see [A refusal carries a status](#a-refusal-carries-a-status). `503 at_capacity` when no execution slot is free - see [Capacity](#capacity) |
-| `GET /metrics`      | its own token, never `security.access_token`                                        | This process's counters, in the Prometheus text exposition format. `401` without the metrics credential. Outside the version prefix and outside the capacity bound - see [the metrics endpoint](#the-metrics-endpoint)                  |
-| `GET /openapi.json` | yes, when one is configured                                                         | The generated interface description                                                                                                                                                                                                     |
-| `GET /docs`         | yes, when one is configured                                                         | A browser interface over that description                                                                                                                                                                                               |
+| Method and path                                               | Token                                                                               | What it is                                                                                                                                                                                                                              |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`                                                 | no                                                                                  | Liveness. The body is exactly `{"status":"ok"}`                                                                                                                                                                                         |
+| `GET /.well-known/oauth-protected-resource[/<resource path>]` | no; `direct` mode only                                                              | RFC 9728 protected-resource metadata: the configured resource identifier and authorization server                                                                                                                                       |
+| `GET /v1/catalog`                                             | yes, when one is configured; plus `sutura:catalog.read` where `security.inbound` is | The metrics this catalog defines, with grains, dimensions and the values a filter may use                                                                                                                                               |
+| `POST /v1/query`                                              | yes, when one is configured; plus `sutura:metrics.ask` where `security.inbound` is  | One certified question. `200` only when it was answered; a refusal carries its own status - see [A refusal carries a status](#a-refusal-carries-a-status). `503 at_capacity` when no execution slot is free - see [Capacity](#capacity) |
+| `GET /metrics`                                                | its own token, never `security.access_token`                                        | This process's counters, in the Prometheus text exposition format. `401` without the metrics credential. Outside the version prefix and outside the capacity bound - see [the metrics endpoint](#the-metrics-endpoint)                  |
+| `GET /openapi.json`                                           | yes, when one is configured                                                         | The generated interface description                                                                                                                                                                                                     |
+| `GET /docs`                                                   | yes, when one is configured                                                         | A browser interface over that description                                                                                                                                                                                               |
 
 `/health` is outside the version prefix on purpose: a probe must keep working across a version bump
 without an orchestrator being reconfigured. It carries no version, no build identifier, no
-dependency list, no configuration and no catalog content, because it is the one path an
-unauthenticated caller can always reach - so every field it might have is a field handed to anybody
-who can route a packet.
+dependency list, no configuration and no catalog content, because an unauthenticated caller can
+always reach it - so every field it might have is a field handed to anybody who can route a packet.
 
 The interface description is served everywhere except production, where it is off by default. It
 describes the surface, which is business information even with no row of data in it.
@@ -341,25 +356,26 @@ A refusal is still a *result* rather than an error - the caller asked something 
 and the answer is no - and that is a statement about the domain, not about the status. Which status
 depends on why:
 
-| `code`                             | Status | What the caller does about it                                                                                                                                                                                                                                                                                                                |
-| ---------------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `metric_unknown`                   | `404`  | Ask `GET /v1/catalog` which metrics this snapshot defines                                                                                                                                                                                                                                                                                    |
-| `grain_not_supported`              | `422`  | The metric exists; that grain is not rendered for it. Pick one the catalog lists                                                                                                                                                                                                                                                             |
-| `time_range_too_long`              | `422`  | Narrow the period. The sentence carries the maximum                                                                                                                                                                                                                                                                                          |
-| `too_many_dimensions`              | `422`  | Group by fewer. The sentence carries the maximum                                                                                                                                                                                                                                                                                             |
-| `duplicate_dimension`              | `422`  | Send it once                                                                                                                                                                                                                                                                                                                                 |
-| `dimension_not_permitted`          | `403`  | The metric declares no such dimension                                                                                                                                                                                                                                                                                                        |
-| `dimension_not_filterable`         | `403`  | It can be grouped by and not filtered on                                                                                                                                                                                                                                                                                                     |
-| `dimension_value_not_allowed`      | `403`  | Use a value the catalog declares. The rejected value is never echoed back                                                                                                                                                                                                                                                                    |
-| `plan_spans_too_many_sources`      | `409`  | Nothing. This deployment will not read from more data systems than it serves                                                                                                                                                                                                                                                                 |
-| `federation_not_executable`        | `409`  | Nothing. This build has no adapter that can execute one half of a two-source question yet                                                                                                                                                                                                                                                    |
-| `federation_link_ambiguous`        | `409`  | Nothing. The question's remote dimensions join through more than one relationship                                                                                                                                                                                                                                                            |
-| `measure_does_not_federate`        | `409`  | Nothing. The measure's aggregate cannot be recombined above two legs                                                                                                                                                                                                                                                                         |
-| `result_too_large`                 | `413`  | Narrow the period or group by fewer dimensions. Nothing was truncated to fit. **One code for two bounds:** more rows than this service's cap, or more data than the data system would return at once. The sentence says which, and names a number only for the first - the second bound belongs to the data system and is not reported to us |
-| `resources_exhausted`              | `422`  | Narrow the period, group by fewer dimensions or add a filter. The ceiling is a configured number and the sentence names it                                                                                                                                                                                                                   |
-| `source_unavailable`               | `503`  | The one refusal worth retrying                                                                                                                                                                                                                                                                                                               |
-| `credential_unavailable`           | `403`  | Nothing you can send. You have no access to that data system, and this deployment will not read it as itself instead - the missing grant is at the data system                                                                                                                                                                               |
-| `legs_decide_identity_differently` | `409`  | Ask the same metric without the dimension on the second data system. The two data systems decide who is asking in two different ways, and a total made of rows read under two identities is a number neither is entitled to. No published build can reach it - every linked adapter serves everyone as one identity                          |
+| `code`                             | Status | What the caller does about it                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `metric_unknown`                   | `404`  | Ask `GET /v1/catalog` which metrics this snapshot defines                                                                                                                                                                                                                                                                                                                                                                |
+| `grain_not_supported`              | `422`  | The metric exists; that grain is not rendered for it. Pick one the catalog lists                                                                                                                                                                                                                                                                                                                                         |
+| `time_range_too_long`              | `422`  | Narrow the period. The sentence carries the maximum                                                                                                                                                                                                                                                                                                                                                                      |
+| `too_many_dimensions`              | `422`  | Group by fewer. The sentence carries the maximum                                                                                                                                                                                                                                                                                                                                                                         |
+| `duplicate_dimension`              | `422`  | Send it once                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `dimension_not_permitted`          | `403`  | The metric declares no such dimension                                                                                                                                                                                                                                                                                                                                                                                    |
+| `dimension_not_filterable`         | `403`  | It can be grouped by and not filtered on                                                                                                                                                                                                                                                                                                                                                                                 |
+| `dimension_value_not_allowed`      | `403`  | Use a value the catalog declares. The rejected value is never echoed back                                                                                                                                                                                                                                                                                                                                                |
+| `plan_spans_too_many_sources`      | `409`  | Nothing. This deployment will not read from more data systems than it serves                                                                                                                                                                                                                                                                                                                                             |
+| `federation_not_executable`        | `409`  | Nothing. This build has no adapter that can execute one half of a two-source question yet                                                                                                                                                                                                                                                                                                                                |
+| `federation_link_ambiguous`        | `409`  | Nothing. The question's remote dimensions join through more than one relationship                                                                                                                                                                                                                                                                                                                                        |
+| `measure_does_not_federate`        | `409`  | Nothing. The measure's aggregate cannot be recombined above two legs                                                                                                                                                                                                                                                                                                                                                     |
+| `result_too_large`                 | `413`  | Narrow the period or group by fewer dimensions. Nothing was truncated to fit. **One code for three bounds:** more rows than this service's cap, more data than the data system would return at once, or more bytes than this service will encode into a response. The sentence says which, and names a number for the first and the third - the second bound belongs to the data system and is not reported to us        |
+| `resources_exhausted`              | `422`  | Narrow the period, group by fewer dimensions or add a filter. The ceiling is a configured number and the sentence names it                                                                                                                                                                                                                                                                                               |
+| `source_unavailable`               | `503`  | The one refusal worth retrying                                                                                                                                                                                                                                                                                                                                                                                           |
+| `credential_unavailable`           | `403`  | Nothing you can send. You have no access to that data system, and this deployment will not read it as itself instead - the missing grant is at the data system                                                                                                                                                                                                                                                           |
+| `legs_decide_identity_differently` | `409`  | Ask the same metric without the dimension on the second data system. The two data systems decide who is asking in two different ways, and a total made of rows read under two identities is a number neither is entitled to. No published build can reach it - every linked adapter serves everyone as one identity                                                                                                      |
+| `deadline_exceeded`                | `422`  | Narrow the period, group by fewer dimensions or add a filter. This deployment stopped the question after its configured budget (`server.request_timeout_seconds` minus a one-second margin); the sentence names it. `docs/adr/0029` records the shape - the shipped default engine does not stop mid-flight on it yet; a deployment that enables the default-off Postgres source does, via `SET LOCAL statement_timeout` |
 
 **The refusal `403`s are not about your credential.** No token and no scope widens a metric's
 dimension set; a refusal `403` is the catalog's answer to "may this be asked of this metric", and the
@@ -388,7 +404,8 @@ places.
 as is the body shape, because only a refusal carries `outcome`:
 
 - `413` is `too_large` when the **request body** was over the limit, and `result_too_large` when the
-  **answer** was too much data - over the row cap, or over what the data system would return at once.
+  **answer** was too much data - over the row cap, over what the data system would return at once, or
+  over this service's own ceiling on the bytes a rendered answer may occupy.
 - `503` is `unavailable` or `at_capacity` from the failure side, and `source_unavailable` from the
   refusal side.
 
@@ -400,8 +417,8 @@ The two are now separable by `code` as well as by status, and a test asserts the
 
 This used to be a `200` for both outcomes, on the argument that an error status invites a client
 library to retry a governance decision until it succeeds. The second half of that is right and the
-first half does not survive checking: nothing mainstream retries a `4xx` by default, and `422` - where
-four of the codes above land - is documented the other way round, as a status a client should expect
+first half does not survive checking: nothing mainstream retries a `4xx` by default, and 6 refusal
+reasons land on `422`, which is documented the other way round, as a status a client should expect
 to fail again on an unchanged request. What the `200` did cost was legibility to everything that reads
 a status and not a body: an ingress log, a dashboard, an error-rate alert, a generated client whose
 success branch is `2xx`. A deployment refusing every question read as perfectly healthy.
@@ -577,7 +594,7 @@ selects which file is layered, so a file that could change it would be self-refe
 | `server.tls_certificate`                        | absent                               | A PEM chain. Only with `tls_termination: in-process`                                                                                                                                                                                                                                                                                           |
 | `server.tls_key`                                | absent                               | The matching PEM private key. Both halves or neither                                                                                                                                                                                                                                                                                           |
 | `rate_limit.enabled`                            | follows the environment              | Off in development and test, on in production. `false` in production is refused                                                                                                                                                                                                                                                                |
-| `rate_limit.probe_per_second`                   | `2`                                  | Liveness and the interface description                                                                                                                                                                                                                                                                                                         |
+| `rate_limit.probe_per_second`                   | `2`                                  | Liveness, protected-resource metadata, and the interface description                                                                                                                                                                                                                                                                           |
 | `rate_limit.probe_burst`                        | `5`                                  |                                                                                                                                                                                                                                                                                                                                                |
 | `rate_limit.api_per_second`                     | `10`                                 | The versioned API                                                                                                                                                                                                                                                                                                                              |
 | `rate_limit.api_burst`                          | `20`                                 |                                                                                                                                                                                                                                                                                                                                                |
@@ -587,14 +604,25 @@ selects which file is layered, so a file that could change it would be self-refe
 | `telemetry.filter`                              | `info`                               | `RUST_LOG` overrides it when set                                                                                                                                                                                                                                                                                                               |
 | `telemetry.format`                              | follows the environment              | `bunyan` in production, `pretty` elsewhere                                                                                                                                                                                                                                                                                                     |
 | `api.docs`                                      | follows the environment              | Off in production, on elsewhere                                                                                                                                                                                                                                                                                                                |
-| `catalog.dir`                                   | `catalog`                            |                                                                                                                                                                                                                                                                                                                                                |
+| `catalog.dir`                                   | `catalog`                            | at most 1,000 documents / 16 MiB of documents in total; more is a startup refusal naming the bound; raising it is a source change, not a setting                                                                                                                                                                                               |
 | `catalog.data_dir`                              | `data`                               | **Printed by the startup banner and read by nothing that opens a data system.** A served source's files come from its own `sources.<alias>.data_dir`, and the `sutura` command reads that same entry or else the directory on its command line                                                                                                 |
 | `catalog.version`                               | `unversioned`                        | A commit id or a build number. What identifies the snapshot                                                                                                                                                                                                                                                                                    |
-| `sources.<alias>.kind`                          | absent                               | `files` is the only kind this build has an adapter for. Required, with no default                                                                                                                                                                                                                                                              |
+| `sources.<alias>.kind`                          | absent                               | `files`, or `bigquery`/`postgres` when that default-off feature was built in. Required, with no default                                                                                                                                                                                                                                        |
 | `sources.<alias>.data_dir`                      | absent                               | Where that source's files are. Required, and absolute                                                                                                                                                                                                                                                                                          |
+| `sources.<alias>.host`                          | absent                               | Postgres only. A DNS name or IP address. Exactly one of `host` and `unix_socket`                                                                                                                                                                                                                                                               |
+| `sources.<alias>.unix_socket`                   | absent                               | Postgres only. An absolute socket directory. Exactly one of `unix_socket` and `host`                                                                                                                                                                                                                                                           |
+| `sources.<alias>.port`                          | absent                               | Postgres only. Required; no guessed `5432`                                                                                                                                                                                                                                                                                                     |
+| `sources.<alias>.database`                      | absent                               | Postgres only. Required                                                                                                                                                                                                                                                                                                                        |
+| `sources.<alias>.user`                          | absent                               | Postgres only. The one role every caller reaches this source as                                                                                                                                                                                                                                                                                |
+| `sources.<alias>.password_file`                 | absent                               | Postgres only. Absolute, read at startup; secret text is refused in the settings tree                                                                                                                                                                                                                                                          |
+| `sources.<alias>.transport_mode`                | absent                               | Postgres only. `plaintext`, `verified` or `mutual`; required, with no default                                                                                                                                                                                                                                                                  |
+| `sources.<alias>.transport_anchors`             | absent                               | Postgres TLS only. `system` as an explicit choice, or an absolute PEM bundle path                                                                                                                                                                                                                                                              |
+| `sources.<alias>.client_certificate`            | absent                               | Postgres mutual TLS only. Absolute PEM chain; both client identity halves or neither                                                                                                                                                                                                                                                           |
+| `sources.<alias>.client_key`                    | absent                               | Postgres mutual TLS only. Absolute PEM private key; both client identity halves or neither                                                                                                                                                                                                                                                     |
 | `sources.<alias>.posture`                       | absent                               | `shared-service-user` or `impersonation-at-source`. Required, with no default                                                                                                                                                                                                                                                                  |
 | `sources.<alias>.acknowledged_because`          | absent                               | The operator's reason. Required for a shared source in `multi-user` mode                                                                                                                                                                                                                                                                       |
 | `sources.<alias>.verification_identity`         | absent                               | The identity that re-runs that source's anchors. Only on an impersonating source                                                                                                                                                                                                                                                               |
+| `tools.run_sql.enabled`                         | `false`                              | `docs/adr/0013`'s raw SQL tool. Refused at boot with a shared source in `multi-user` mode - see [The raw SQL tool](#the-raw-sql-tool-over-the-postgres-source-above)                                                                                                                                                                           |
 | `runtime.max_concurrent_queries`                | `8`                                  | How many questions execute at once. See [Capacity](#capacity)                                                                                                                                                                                                                                                                                  |
 | `runtime.admission_timeout_seconds`             | `5`                                  | How long one waits for a slot before it is shed `503`                                                                                                                                                                                                                                                                                          |
 | `runtime.engine_worker_threads`                 | the machine's                        | How wide the in-process engine runs. Set it under a CPU quota                                                                                                                                                                                                                                                                                  |
@@ -619,7 +647,7 @@ security:
 
 sources:
   local:
-    # `files` or `bigquery`. Required, with no default - and which of them a given BINARY can
+    # `files`, `bigquery` or `postgres`. Required, with no default - and which of them a given BINARY can
     # actually open is a second question, answered below.
     kind: "files"
     # Absolute. A relative path resolves against whatever working directory the supervisor chose.
@@ -688,6 +716,67 @@ Two facts, declared by two different parties, and conflating them gives the mode
 The boot check compares them. A source configured to impersonate on an adapter that cannot does not
 start, and there is no fallback.
 
+### A `postgres` source, least authority, and its channel
+
+Postgres is behind the default-off `postgres` feature on both binaries. A default build refuses the
+entry by name and tells the operator which feature is absent; current published artifacts leave it
+off. A source build enables it explicitly with `--features postgres`, the same shape as
+`--features bigquery` above; no `just` task and no nix package builds it, and release packaging
+chooses the default set.
+
+One remote, server-verified source is declared like this:
+
+```yaml
+security:
+  identity: "multi-user"
+
+sources:
+  warehouse:
+    kind: "postgres"
+    host: "db.example.com"
+    port: 5432
+    database: "analytics"
+    user: "sutura_reader"
+    password_file: "/etc/sutura/postgres-password"
+    transport_mode: "verified"
+    # An explicit choice, never a default. Use `system` to read the host store instead.
+    transport_anchors: "/etc/sutura/database-ca.pem"
+    posture: "shared-service-user"
+    acknowledged_because: "the reporting role is intentionally the same for every caller"
+```
+
+The password file contains only the password and should be readable by the service account alone.
+The process reads and trims it at startup; an unreadable or empty file stops the process. The source
+entry cannot contain the password itself. No host or port is inferred, and `host` and `unix_socket`
+are mutually exclusive.
+
+`transport_mode` has three states, not a verification flag:
+
+- `plaintext` uses no TLS. It is accepted only with an absolute unix-socket directory or a loopback
+  IP literal; a hostname or non-loopback address is a startup refusal.
+- `verified` requires `transport_anchors` and requires the TLS handshake. `system` means the host's
+  trust store because the operator wrote it; an absolute path means that PEM bundle alone. It
+  presents nothing, so a `client_certificate` or `client_key` written on a `verified` entry is a
+  **startup refusal naming the key**, never a setting read past - the mode that presents a
+  certificate is `mutual`.
+- `mutual` adds `client_certificate` and `client_key`, both absolute and both required. The source
+  still verifies the server against `transport_anchors`. The client certificate identifies this
+  deployment, not the caller, so it does not change the `shared-service-user` posture.
+
+Create a login role with only the database and objects this catalog names. In ordinary PostgreSQL
+terms that means `CONNECT` on the database, `USAGE` on the selected schemas, and `SELECT` on the
+named tables (plus equivalent grants for future tables only if the deployment actually needs them).
+Do not make the role an owner, superuser, creator, or `BYPASSRLS`. If row-level security is meant to
+separate callers, this static source cannot deliver it: every question uses the same role and sees
+the same policy result. Per-subject Postgres credentials are separate work.
+
+The gate-backed example loads `examples/single-player/data/*.csv` into the provisioned Postgres tier,
+starts the real `sutura-serve` binary with the declaration above over verified loopback TLS, and asks
+the example's certified June revenue question over HTTP. Run it with `just test`, which is where the
+tier is provisioned - `just serve-e2e` scopes `cargo nextest` to `sutura-serve` alone and does not
+source `nix/with-tier.sh`, so run from a shell with no tier up it returns without asserting. No fixed
+fixture port is involved either way.
+
 | Posture                   | What it means                                                          | What decides what a subject sees                                                |
 | ------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | `shared-service-user`     | Every query reaches the source under one identity the deployment holds | that identity's grants. Every caller sees the same rows                         |
@@ -716,9 +805,75 @@ fact leg and a lookup leg, and `answer` either executes it or refuses it as `fed
 while no adapter can execute a leg - so the split is never served as a partial or a half-executed
 answer. Three or more sources refuse at plan time as `plan_spans_too_many_sources`.
 
-*The limit, because it decides what is worth configuring today:* the only adapter this build links is
-the in-process engine, so two configured sources are two engines over two directories. A data system
-across a network arrives with its own adapter.
+*The limit, because it decides what is worth configuring today:* the default build links only the
+in-process engine. Builds enabling `bigquery` or `postgres` add that one network adapter, and one
+process still opens one KIND of data system at a time.
+
+### The raw SQL tool, over the postgres source above
+
+[`docs/adr/0013`](adr/0013-a-raw-sql-tool-off-by-default.md) is the record; this is the settings key
+and the split between what this service enforces, what the connecting role enforces, and what
+neither does. `examples/raw-sql/README.md` is the worked showcase - a settings snippet, a role grant,
+one question with no certified metric, over the same Postgres source declared above.
+
+**`tools.run_sql.enabled`, off by default, per deployment.** An absent `tools:` key is the ordinary
+case `docs/adr/0013` calls normal, not a narrower mode of it: `run_sql` does not appear in `tools/list`
+or the served OpenAPI document, and calling it by name is refused as `tool_not_enabled` - a different
+code from `insufficient_scope`, because obtaining `sutura:sql.run` could not help a caller a
+deployment switch refused. Turning it on is one line an operator writes and a reviewer sees.
+
+**Enforced by this service, once the switch is on:**
+
+- A caller still needs `sutura:sql.run` beside the deployment switch - two independent gates, and the
+  switch alone does not widen anyone's scope.
+- The result's wire shape has no field for a definition version, a digest or provenance of any kind -
+  `RawOutcome` cannot be rendered as a certified answer because there is nowhere on the type to put
+  one, not because a check catches it trying.
+- The row cap (`MAX_ROWS`) applies exactly as it does to a certified answer, enforced by reading no
+  more than that many rows past the limit off a STREAMED result rather than materialising the whole
+  answer first.
+- One statement per call. The extended query protocol this adapter uses cannot carry a second command
+  in the same `Parse` message, so `select 1; drop table t` is refused by the SERVER as a syntax error
+  before either half runs - sutura reads no keyword out of the text to decide this.
+- **A boot refusal**, reusing the same `security.identity` mechanism the shared-source acknowledgement
+  above already uses: `tools.run_sql.enabled: true` with `security.identity: multi-user` does not
+  start. Abridged: *"tools.run_sql.enabled is true and security.identity is `multi-user`. The raw SQL
+  tool executes under one shared identity for every caller... it may run only where the deployment is
+  single-user or a source executes as the asking subject."* Today's Postgres adapter cannot execute as
+  the asking subject, so this refuses on the declared mode alone - stated as the limit it is: a
+  boot-time check over a written word, not a runtime measurement that callers are actually one person.
+- **A minimal audit record per call, refusal included**, carrying the chain, the row count or the
+  refusal, and the statement text as an audit-only field this service never returns to a caller.
+
+**Enforced by the connecting role, and by nothing else:**
+
+- **What the statement may read or write.** Every call runs inside a transaction this adapter opens
+  `BEGIN READ ONLY` and always rolls back - a real, server-enforced second control beside the role,
+  closing the session-level escape (`SET TRANSACTION READ WRITE`, `default_transaction_read_only`)
+  [`docs/adr/0013`](adr/0013-a-raw-sql-tool-off-by-default.md) already rejects as undoable by the
+  caller's own next statement. But that transaction bounds SQL-visible writes for the DURATION of one
+  call; it says nothing about what the role could otherwise do, and nothing about a VOLATILE
+  function's own side effects (a file write, a network call through an extension) once the role may
+  call one at all. `docs/serving.md`'s general Postgres guidance above - `SELECT` on the named tables,
+  never an owner, a superuser, a creator or `BYPASSRLS` - is what actually bounds this, and it is an
+  operator's `GRANT`, not a setting sutura reads or verifies.
+- **How long a statement may run.** The connect-time `statement_timeout` this source's connection
+  already carries is the ceiling. It is one number for every caller today, not narrowed per request -
+  [`docs/adr/0013`](adr/0013-a-raw-sql-tool-off-by-default.md) names the caller-derived deadline as a
+  prerequisite this build does not yet carry for the raw path.
+
+**What neither enforces, stated because an overstated control is the defect this repository names
+directly:**
+
+- **The intent boundary.** The scope gate bounds WHO may call `run_sql`; the role bounds WHAT it may
+  read or write. Neither bounds what a prompt-injected instruction can talk the calling agent into
+  SENDING as the statement - `docs/adr/0013`'s own accounting of what this tool spends, restated here
+  because an operator reading only this page should still see it.
+- **Whether the connecting role is actually narrowed to `SELECT`.** Sutura reads no privilege off the
+  source; the `GRANT`s above are the only source of truth for what the role can do, exactly as they
+  are for the certified path's own source credential.
+- **Which of several open sources a statement runs against.** This build targets the sole registered
+  data system and refuses rather than guesses where more than one is open; naming one is future work.
 
 ### Address families
 
@@ -1038,9 +1193,6 @@ Named rather than implied, because an absence that reads as an oversight gets as
   id, and the rate limit on that refetch - and a sidecar that rewrites a mounted key set is how a
   process with no egress rotates. **The limit a file has:** no cache header, so a key rotated *without*
   its id changing is one this deployment keeps using.
-- **No protected-resource metadata.** A `401` carries an RFC 6750 challenge naming the realm and no
-  `resource_metadata` parameter, so a client learns which authorization server governs this resource
-  out of band rather than by reading a document here.
 - **No replay protection on a gateway assertion.** The *window* is bounded - an `iat` is required and
   `exp - iat` is capped - and inside it an intercepted assertion replays. Closing that needs the
   assertion bound to the request (a hash of the method, path and body the component computes) or a
@@ -1063,21 +1215,11 @@ Named rather than implied, because an absence that reads as an oversight gets as
   the log, which is what makes one request's lines findable. What does not exist is a trace
   exporter, which is a decision about a backend, a sampling rate and an egress path none of which has
   been made.
-- **No CONFIGURABLE client TLS, and this bullet is narrower than it used to be.** It used to say no
-  crate here holds an HTTP client, and that stopped being true: `sutura-exec-bigquery`'s default-off
-  `wire` feature holds one - `ureq` over rustls, with a compiled-in root set and `https_only` - so
-  outbound TLS to a data source exists and works. What does not exist is any way for a deployment to
-  *configure* it: no trust-store setting, no client certificate, no pinning, and no configuration
-  group at all. Two reasons, and the second is why it is not simply an omission. There is little to
-  attach one to: the crate is linked and `kind: bigquery` dispatches behind a default-off feature,
-  so what a default build can open still reads local files. **Both clauses that used to stand here -
-  *no composition root links that crate* and *`sutura-serve` refuses `kind: bigquery` by name* - are
-  spent**, which `docs/adr/0017`'s second amendment recorded. And for that endpoint
-  the *absence* of configuration is the safer default - a compiled-in root set means the same binary
-  trusts the same authorities on every machine, and a settable host is a settable place to send a
-  bearer token, which `docs/adr/0018` records as a deliberate trade against local testability. A
-  configuration group arrives with the first networked adapter a deployment can actually open, and
-  the parsing and validation the inbound listener already does is what it will be built out of.
+- **No configurable client TLS for HTTP adapters.** Postgres now has a per-source three-state
+  declaration, explicit anchors, and an optional client identity. The BigQuery wire does not honour
+  it: `ureq` still verifies its fixed endpoint against its compiled-in root set and accepts no client
+  certificate. Sharing the declaration with HTTP adapters and defining certificate rotation remain
+  separate work; Postgres reading its files once at startup is not rotation.
 - **No mutual TLS inbound either.** The listener above presents a certificate and verifies no
   client. Client-certificate authentication would be an identity, and this service has none to
   attach one to - see the first section.
@@ -1111,10 +1253,11 @@ unauthenticated caller can create a rate-limit bucket on any path that resolves 
 buckets are swept on an interval, so the memory is bounded rather than growing for the life of the
 process.
 
-An unauthenticated caller can reach `/health` and learn that the process is up, and can learn which
-paths exist - a path under the version prefix that matches no route answers `404` without holding a
-credential. The paths are in the published interface description in any case. Every path that
-resolves to a handler holds a credential: the API's, or `/metrics`'s own.
+An unauthenticated caller can reach `/health` and learn that the process is up. In `direct` mode it
+can also read the protected-resource metadata that tells clients which authorization server governs
+the resource. A path under the version prefix that matches no route answers `404` without holding a
+credential. The paths are in the published interface description in any case. Every other path that
+resolves to a handler holds the API credential when one is configured, or `/metrics`'s own.
 
 A caller with the token can occupy every execution slot and shed everybody else, inside their own
 rate limit, by asking questions that each cost more than the request timeout. The `503` the others

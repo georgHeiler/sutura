@@ -22,7 +22,9 @@ Rules that are not visible from a manifest:
   two transports cannot see each other. Its `Warehouses` registry is generic in one adapter type, so
   a heterogeneous set - or a catalog naming two KINDS of source - is an architecture decision.
 - **A transport is transport-only.** It never reads a catalog directory and never opens a data
-  system; a composition root does both. `sutura-mcp` depends on nothing in `sutura-http`.
+  system; a composition root does both. `sutura-mcp` carries no NORMAL dependency on `sutura-http` -
+  a dev-dependency exists, for one differential test, and is exempt from that rule the same way
+  `sutura-exec-bigquery` dev-depending on `sutura-exec-datafusion` is.
 - **`sutura-cli` reads the same `sources:` tree `sutura-serve` does**, and dispatches the declared
   `SourceKind` through an exhaustive match of its own - so a third kind is a compile error in both
   composition roots. The two differ in what an ABSENT entry means: a startup refusal there, and a
@@ -43,6 +45,23 @@ imported by `flake.nix` and `devenv.nix` alike so a pin cannot differ between th
 Postgres and DuckDB adapters are dev-dependencies for the same reason, and their cells are
 fail-closed: the Postgres tier is provisioned by `checks.nextest` **and** by `just test` from one
 script, so the two cannot drift.
+
+**A SERVED Postgres source is the other half of that, and it does not contradict it.** Since
+`telekom/sutura#124`/`#125` landed as one change, `sutura-exec-postgres` is also an optional,
+default-off `postgres` dependency of both composition roots: the corpus path reaches it as a
+dev-dependency, and a deployment that writes `kind: postgres` pays the link only when it asks for
+the feature.
+
+**Nothing a release publishes links it, and `checks.shipped-features` holds that only by PROXY.**
+That gate's `forbidden` list is `ring` and `ureq`; it never names `sutura-exec-postgres`. What makes
+the ban reach this adapter is that `rustls` is a **non-optional** dependency of it and the workspace
+pins rustls to the `ring` provider - `sutura-exec-postgres` -> `rustls` -> `ring`, readable in
+`Cargo.lock` and in neither edge optional - so a published binary linking the adapter would carry
+`ring` in its `cargo auditable` section and the ban would fire. **The limit, and it is the whole
+reason to cite the mechanism rather than the sentence:** the day that rustls dependency goes behind
+a feature, or the provider pin moves off `ring`, the gate stays green over a published binary that
+links the adapter, and nothing says so. A direct assertion would have to name the adapter in that
+list.
 
 ## Why a networked adapter hides behind a default-off feature
 
@@ -76,8 +95,8 @@ jobs build them beside the shipped set, so the documented feature-on build is LI
 request rather than argued about. Until it existed the only evidence was a native `cargo check`,
 which stops at metadata and therefore says nothing about the musl link that is the whole risk.
 **What it does not cover:** it links and never runs, and it probes only the features a binary
-declares - `sutura-serve`'s `tls` and `bigquery` are the same shape and are deliberately unprobed,
-because the closure is compiled per target and three probes would triple the job.
+declares - `sutura-serve`'s `tls`, `bigquery` and `postgres` are the same shape and are deliberately
+unprobed, because the closure is compiled per target and a probe for each would multiply the job.
 
 **Running it corrected the paragraph above, and default-off is a decision about the ARTEFACT and
 not about build time** - cite it that way, held by `checks.shipped-features`. `docs/adr/0017` carries

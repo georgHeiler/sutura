@@ -45,6 +45,11 @@ pub(crate) struct RawSettings {
     pub(crate) runtime: RawRuntime,
     #[serde(default)]
     pub(crate) prompt: RawPrompt,
+    #[serde(default)]
+    pub(crate) tools: RawTools,
+    /// Per-replica, in-process resource ceilings. Absent means none of them are configured.
+    #[serde(default)]
+    pub(crate) governance: RawGovernance,
     /// The data systems this deployment declares, keyed by the alias a model's `source:` names.
     ///
     /// **A map and not a list**, so the key IS the alias and there is one place a source is named. The
@@ -135,6 +140,36 @@ pub(crate) struct RawSource {
     /// deployment hands a subject's token to, and the scope the exchanged credential is minted for.
     #[serde(default)]
     pub(crate) workload_identity: Option<RawWorkloadIdentity>,
+    /// The host a `postgres` source dials over TCP. Mutual with `unix_socket`.
+    #[serde(default)]
+    pub(crate) host: Option<String>,
+    /// The unix socket directory a `postgres` source connects through. Mutual with `host`.
+    #[serde(default)]
+    pub(crate) unix_socket: Option<String>,
+    /// The TCP port a `postgres` source dials, when `host` is set.
+    #[serde(default)]
+    pub(crate) port: Option<u16>,
+    /// The database a `postgres` source connects to.
+    #[serde(default)]
+    pub(crate) database: Option<String>,
+    /// The role a `postgres` source connects as.
+    #[serde(default)]
+    pub(crate) user: Option<String>,
+    /// The file a `postgres` source's password is read from at boot.
+    #[serde(default)]
+    pub(crate) password_file: Option<String>,
+    /// How the channel to a `postgres` source is secured: `plaintext`, `verified`, or `mutual`.
+    #[serde(default)]
+    pub(crate) transport_mode: Option<String>,
+    /// The trust anchors a TLS `postgres` source verifies against: `system` or an absolute PEM path.
+    #[serde(default)]
+    pub(crate) transport_anchors: Option<String>,
+    /// The client certificate a `mutual` `postgres` source presents. Absolute.
+    #[serde(default)]
+    pub(crate) client_certificate: Option<String>,
+    /// The client key a `mutual` `postgres` source presents. Absolute. A secret; never inlined.
+    #[serde(default)]
+    pub(crate) client_key: Option<String>,
 }
 
 /// One source's Workload Identity Federation provider, as read.
@@ -171,6 +206,34 @@ pub(crate) struct RawRuntime {
     #[serde(default)]
     pub(crate) engine_worker_threads: Option<usize>,
     pub(crate) shutdown_grace_seconds: u64,
+}
+
+/// Per-replica, in-process resource ceilings. `docs/adr/0030` decides the shape and names the
+/// limit: `Default` (an absent section) means none of them are configured, which is today's
+/// behaviour and not a bound of zero.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawGovernance {
+    /// A byte ceiling one subject may spend, from a dry run's own estimate, before this replica
+    /// refuses further questions until the window resets. Absent means no ceiling: this replica
+    /// counts nothing and refuses nothing on this account, which is today's behaviour.
+    ///
+    /// **Counts only spend an adapter priced at pre-flight - today `BigQuery` - and refuses
+    /// nothing for an adapter that did not price its dry run.** Writing this key does not meter
+    /// every declared source; it meters what the dry run itself was able to estimate.
+    ///
+    /// A nested object rather than two sibling keys, so the pair is declared together or not at
+    /// all - there is no state where only one of `bytes` and `window_seconds` is configured for
+    /// `Settings::parse` to have an opinion about.
+    #[serde(default)]
+    pub(crate) per_replica_spend_ceiling: Option<RawSpendCeiling>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSpendCeiling {
+    pub(crate) bytes: u64,
+    pub(crate) window_seconds: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -362,6 +425,27 @@ fn catalog_kind_markdown() -> String {
 /// has. `catalog_prose` absent means `quoted`, which is also what `defaults.yaml` says - written
 /// there rather than only here so the value in effect is readable in one file, the way
 /// `rate_limit.client_address` is.
+/// The tool surface's own settings. Off by default, per tool: an absent `tools:` key is exactly the
+/// deployment `docs/adr/0013` calls the normal case, and there is deliberately no plural default
+/// direction to get wrong - each tool defaults to off, named by its own key.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawTools {
+    #[serde(default)]
+    pub(crate) run_sql: RawRunSql,
+}
+
+/// The raw SQL tool's own settings - `docs/adr/0013`.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawRunSql {
+    /// Off unless an operator writes `true`. There is no partial or per-source form in this PR: the
+    /// tool targets the sole registered source, and a deployment naming which of several it means
+    /// is `sutura_app::single_raw_capable_warehouse`'s own stated future work.
+    #[serde(default)]
+    pub(crate) enabled: bool,
+}
+
 #[derive(Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawPrompt {

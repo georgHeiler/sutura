@@ -13,13 +13,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use sutura_config::EngineWorkers;
-use sutura_domain::capabilities::MetadataCapabilities;
-use sutura_domain::catalog::{Definitions, Description, Model};
-use sutura_domain::knowledge::Knowledge;
-use sutura_domain::model::{ColumnName, ModelName, SourceName, TableName};
-use sutura_domain::pinned::{Contribution, ContributionManifest, DefinitionVersion, PinnedDefinitions};
+use sutura_domain::model::TableName;
 
-use super::boot::refuse_unattached;
 use super::{ENGINE_SOURCE, Opened, OpenedSources, open_engine};
 
 fn tables(names: &[&str]) -> BTreeSet<TableName> {
@@ -81,6 +76,8 @@ fn files(opened: Result<OpenedSources, String>) -> Opened {
         Ok(OpenedSources::Files(files)) => files,
         #[cfg(feature = "bigquery")]
         Ok(OpenedSources::BigQuery(_)) => panic!("expected the file engine, got the BigQuery arm"),
+        #[cfg(feature = "postgres")]
+        Ok(OpenedSources::Postgres(_)) => panic!("expected the file engine, got the Postgres arm"),
         Err(message) => panic!("{message}"),
     }
 }
@@ -129,104 +126,14 @@ fn wif() -> &'static str {
      providers/sso\"\n      scope: \"https://www.googleapis.com/auth/bigquery.readonly\"\n"
 }
 
-/// The ordinary declaration: the engine source, shared, over the example data.
-fn engine_declared() -> sutura_config::SourceRegistry {
-    registry(&entry(ENGINE_SOURCE, "shared-service-user", ""))
-}
+mod support;
 
-/// One model as a catalog document names it: the model, its data system, its table.
-pub(crate) type DeclaredModel<'raw> = (&'raw str, &'raw str, &'raw str);
+use support::{bundle_with_an_anchor, engine_declared};
 
-/// A pinned bundle over exactly the models given, and no metrics.
-///
-/// Models are all `open_engine` reads: [`sutura_app::sources`] maps over them and `attach` is
-/// called once per model, so a metric would add nothing any arm of that function looks at.
-/// Leaving them out is what lets one helper stand behind every arm below.
-///
-/// `pub(crate)` so `crate::boot`'s own tests build their bundles the same way rather than growing a
-/// second copy of this that could drift from what a document really produces. Both modules are
-/// `#[cfg(test)]`, so nothing compiled into the binary can reach it.
-pub(crate) fn bundle_over(models: &[DeclaredModel<'_>]) -> PinnedDefinitions {
-    let declared: Vec<Model> = models
-        .iter()
-        .map(|&(model, source, table)| {
-            Model::new(
-                ModelName::parse(model).expect("a test model is a model"),
-                SourceName::parse(source).expect("a test source is a source"),
-                TableName::parse(table).expect("a test table is a table"),
-                BTreeSet::from([ColumnName::parse("customer_key").expect("a test column is a column")]),
-                Description::default(),
-            )
-        })
-        .collect();
-    let definitions = Definitions::assemble(declared, vec![], vec![]).expect("the test bundle is consistent");
-    PinnedDefinitions::pin(
-        DefinitionVersion::parse("test-1").expect("a test version is a version"),
-        definitions,
-        Knowledge::none(),
-        ContributionManifest::single(
-            SourceName::parse("local").expect("a test source is a source"),
-            Contribution::of(MetadataCapabilities::nothing()),
-        ),
-    )
-    .expect("the test definitions hash")
-}
-
-/// A bundle whose one metric declares an anchor, on `source`.
-///
-/// The anchor's NUMBER is irrelevant here and nothing executes it: what the boot check reads is
-/// that an anchor exists and which source the metric's model sits on. The model is
-/// `dim_customer`, so the table behind it is a real file - which keeps a refusal about identity
-/// from being satisfied by a missing CSV.
-fn bundle_with_an_anchor(source: &str) -> PinnedDefinitions {
-    use sutura_domain::calendar::{Date, TimeRange};
-    use sutura_domain::catalog::{Anchor, AnchorValue, Metric};
-    use sutura_domain::measure::{AggregatedColumn, Measure, Term};
-    use sutura_domain::model::{Aggregate, Grain, MetricName};
-
-    let column = |raw: &str| ColumnName::parse(raw).expect("a test column is a column");
-    let model = Model::new(
-        ModelName::parse("customers").expect("a test model is a model"),
-        SourceName::parse(source).expect("a test source is a source"),
-        TableName::parse("dim_customer").expect("a test table is a table"),
-        BTreeSet::from([column("customer_key"), column("signed_up_on")]),
-        Description::default(),
-    );
-    let range = TimeRange::new(
-        Date::parse("2026-06-01").expect("a test date is a date"),
-        Date::parse("2026-07-01").expect("a test date is a date"),
-    )
-    .expect("June is a range");
-    let metric = Metric::new(
-        MetricName::parse("recurring_revenue").expect("a test metric is a metric"),
-        ModelName::parse("customers").expect("a test model is a model"),
-        Measure::Simple(Term::Aggregate(AggregatedColumn::new(
-            Aggregate::Count,
-            column("customer_key"),
-        ))),
-        Vec::new(),
-        column("signed_up_on"),
-        BTreeSet::from([Grain::Month]),
-        Vec::new(),
-        Some(Anchor::new(
-            range,
-            AnchorValue::parse("7").expect("a test anchor value is a value"),
-        )),
-        Description::default(),
-    )
-    .expect("no dimensions to duplicate");
-    let definitions = Definitions::assemble(vec![model], vec![], vec![metric]).expect("the test bundle is consistent");
-    PinnedDefinitions::pin(
-        DefinitionVersion::parse("test-1").expect("a test version is a version"),
-        definitions,
-        Knowledge::none(),
-        ContributionManifest::single(
-            SourceName::parse("local").expect("a test source is a source"),
-            Contribution::of(MetadataCapabilities::nothing()),
-        ),
-    )
-    .expect("the test definitions hash")
-}
+// Re-exported so `crate::tests::bundle_over` still resolves - `crate::boot`'s own tests use
+// that path, and moving the definition must not move the address a caller outside this file
+// depends on.
+pub(crate) use support::bundle_over;
 
 #[test]
 fn a_catalog_naming_a_source_with_no_declaration_starts_nothing() {
@@ -419,6 +326,77 @@ fn opened_bigquery(entries: &str) -> Result<OpenedSources, String> {
     )
 }
 
+/// One `sources:` entry for a `Postgres` database, with every key that kind is opened with.
+///
+/// `127.0.0.1` with `transport_mode: "plaintext"` is the one combination issue 124's non-loopback
+/// fail-closed still parses - a remote host declared plaintext is a settings-tree refusal, tested in
+/// `sutura-config`, and would stop these cells before they reached the composition root's own cross-
+/// check. The password file points at a path that is not there, for the reason `bigquery_entry`'s
+/// credential file does: a refusal naming that key is proof the composition reached the connection
+/// layer, which is the furthest a test with no server can get.
+///
+/// Gated on `postgres` itself: the only caller today is the impersonation cross-check below, which
+/// is gated the same way - unlike `bigquery_entry`, nothing here is exercised on a build without the
+/// feature, so leaving it unconditional would be dead code there.
+#[cfg(feature = "postgres")]
+fn postgres_entry(alias: &str, posture: &str, extra: &str) -> String {
+    format!(
+        "  {alias}:\n    kind: \"postgres\"\n    host: \"127.0.0.1\"\n    port: 5432\n    database: \
+         \"warehouse\"\n    user: \"sutura\"\n    password_file: \"/nonexistent/sutura-test-postgres-password\"\n    \
+         transport_mode: \"plaintext\"\n    posture: \"{posture}\"\n{extra}"
+    )
+}
+
+/// The startup a `postgres` source produces, whichever way this binary was built.
+#[cfg(feature = "postgres")]
+fn opened_postgres(entries: &str) -> Result<OpenedSources, String> {
+    open_engine(
+        &bundle_over(&[("customers", "warehouse", "dim_customer")]),
+        &registry(entries),
+        one_worker(),
+        default_timeout(),
+    )
+}
+
+#[test]
+#[cfg(feature = "postgres")]
+fn a_postgres_source_configured_to_impersonate_refuses_at_boot() {
+    // **The Postgres half of the cross-check the neighbouring
+    // `a_source_configured_to_impersonate_on_an_adapter_that_cannot_refuses_at_boot` proves over the
+    // in-process engine.** `PostgresWarehouse::IMPERSONATION` is `NoPlaceForASubject` - one
+    // connection under the deployment's declared identity, with nowhere for a subject's own
+    // credential to arrive - and `build_postgres` runs this check BEFORE it reads `password_file` or
+    // dials anything, so the refusal is reachable with no server listening and no password file on
+    // disk.
+    //
+    // Until this cell existed, that ordering was proven for the engine and for BigQuery and asserted
+    // nowhere for this adapter - a Postgres entry declared `impersonation-at-source` had never been
+    // opened by a test at all.
+    let error = refusal(
+        opened_postgres(&postgres_entry("warehouse", "impersonation-at-source", wif())),
+        "an impersonating posture on an adapter with nowhere for a subject's credential to arrive must not start",
+    );
+    assert!(error.contains("warehouse"), "the refusal must name the source: {error}");
+    assert!(
+        error.contains("per-subject credential"),
+        "the refusal must say what the adapter cannot do: {error}"
+    );
+    assert!(
+        error.contains("no fallback"),
+        "the refusal must say there is no fallback: {error}"
+    );
+    // NOT the neighbouring arms: the entry is declared, the build DOES link the adapter, and the
+    // check fires before the connection step would name the unreadable password file.
+    assert!(
+        !error.contains("--features postgres"),
+        "this build DID link the adapter: {error}"
+    );
+    assert!(
+        !error.contains("password_file"),
+        "the capability cross-check fires before the password file is read: {error}"
+    );
+}
+
 #[test]
 fn a_bigquery_source_missing_a_key_that_kind_is_opened_with_does_not_load() {
     // **A settings-tree refusal rather than a boot one, and it belongs here for the reason the
@@ -580,37 +558,14 @@ fn a_bigquery_ceiling_the_adapter_will_not_send_is_a_startup_refusal_naming_the_
     );
 }
 
-#[test]
-#[cfg(feature = "bigquery")]
-fn a_request_timeout_that_leaves_no_job_budget_does_not_start() {
-    // **The subtle one, and it is a bug this test exists to have caught rather than a range check.**
-    // A job's deadline is not `server.request_timeout_seconds`: an answer makes
-    // `QueryDeadline::CALLS_PER_ANSWER` calls and each pays a connect margin, so filling the deadline
-    // with the whole timeout would produce a job allowed to outlive the request that promised it -
-    // green in every test here and an overrun under load. `within_request_timeout` owns that
-    // arithmetic, next to the constant it depends on.
-    //
-    // Ten seconds is the smallest number that makes the point: half of it is five, the connect margin
-    // is five, and what is left is nothing - so a deployment whose timeout cannot fit a query is told
-    // so at startup rather than being handed a clamped value nobody chose.
-    let error = refusal(
-        open_engine(
-            &bundle_over(&[("customers", "warehouse", "dim_customer")]),
-            &registry(&bigquery_entry("warehouse", "shared-service-user", "")),
-            one_worker(),
-            sutura_config::RequestTimeout::parse(10).expect("ten seconds is a request timeout"),
-        ),
-        "a request timeout with no room for a job is not a servable deployment",
-    );
-    assert!(
-        error.contains("server.request_timeout_seconds"),
-        "the refusal must name the key an operator has to change: {error}"
-    );
-    assert!(
-        !error.contains("credential_file"),
-        "the budget is worked out before the credential file is read: {error}"
-    );
-}
+// `a_request_timeout_that_leaves_no_job_budget_does_not_start` lived here: a ten-second
+// `server.request_timeout_seconds` used to refuse a `bigquery` deployment at boot, because
+// `QueryDeadline::within_request_timeout` divided that number by the two calls one answer makes and
+// found nothing left. `docs/adr/0029` retired that arithmetic - a request-time job now derives
+// `timeoutMs`/`jobTimeoutMs` from the port's own `Deadline`, which the transport opens from the SAME
+// key without dividing it, so a ten-second `server.request_timeout_seconds` is a usable (if narrow)
+// budget rather than an unservable one. The refusal this test held is gone with the arithmetic that
+// produced it; deleted rather than adapted, because there is no boot-time number left to test.
 
 #[test]
 fn an_anchor_on_a_bigquery_source_is_held_to_the_same_verification_rule() {
@@ -852,53 +807,6 @@ fn a_model_with_no_file_behind_it_starts_nothing() {
     assert!(error.contains("fct_order.csv"), "the CSV path is missing: {error}");
     assert!(error.contains("fct_order.parquet"), "the Parquet path is missing: {error}");
     assert!(error.contains("table fct_order"), "the table is not named: {error}");
-}
-
-#[test]
-fn a_model_the_engine_has_no_table_for_stops_the_process() {
-    // The startup sequence loads the catalog TWICE - the engine is opened for the first bundle
-    // and the service validates and serves the second - so a model added to the catalog
-    // directory between the two calls was served with nothing attached behind it. `answer`
-    // cannot catch that: its only check on the engine is that the source NAME matches, so the
-    // first question about the new metric came back as an error from the engine rather than as a
-    // refusal at startup.
-    let err = refuse_unattached(
-        &tables(&["fact_subscription", "dim_customer"]),
-        &tables(&["fact_subscription"]),
-    )
-    .expect_err("a served model with no attached table does not serve");
-    assert!(err.contains("Served with no table attached: [dim_customer]"), "{err}");
-    assert!(err.contains("Attached and no longer served: []"), "{err}");
-    assert!(err.contains("the catalog changed while this process was starting"), "{err}");
-}
-
-#[test]
-fn a_table_attached_for_a_model_no_longer_served_stops_it_too() {
-    // The other direction, and not pedantry: it means the catalog directory changed between two
-    // loads seconds apart. This one would answer every question correctly, which is exactly why
-    // it has to be loud - whatever else moved in that edit is the part nobody has looked at.
-    let err = refuse_unattached(
-        &tables(&["fact_subscription"]),
-        &tables(&["fact_subscription", "dim_customer"]),
-    )
-    .expect_err("an attached table for nothing served does not serve");
-    assert!(err.contains("Served with no table attached: []"), "{err}");
-    assert!(err.contains("Attached and no longer served: [dim_customer]"), "{err}");
-}
-
-#[test]
-fn the_two_bundles_agreeing_is_the_ordinary_case_and_starts() {
-    // The check has to be silent when nothing changed, which is every start. An empty catalog is
-    // already refused earlier, by `open_engine`, so the empty pair is not a case this decides.
-    refuse_unattached(&tables(&["fact_subscription"]), &tables(&["fact_subscription"])).expect("two bundles that agree start");
-    assert!(
-        refuse_unattached(
-            &tables(&["dim_customer", "fact_subscription"]),
-            &tables(&["fact_subscription", "dim_customer"])
-        )
-        .is_ok(),
-        "the comparison is over sets, so declaration order is not a difference"
-    );
 }
 
 #[test]

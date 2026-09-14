@@ -87,21 +87,23 @@ const TOO_MANY_DIMENSIONS: Guide = Guide {
     remedy: "Ask a narrower question, or ask two questions. Do not resend the same list.",
 };
 
-// ONE guide for two bounds, and the prose says both rather than the row cap alone. The refusal
-// carries a `ResultBound` naming which one fired, and a caller reads that in the sentence the
-// transport rendered; what the prompt lists is what a refusal MEANS and what to do about it, and
-// those are the same for both - too much data, ask a narrower question. A second guide would put a
-// second entry under one variant name and give an agent two paragraphs saying one thing.
+// ONE guide for three bounds, and the prose says all three rather than the row cap alone. The
+// refusal carries a `ResultBound` naming which one fired, and a caller reads that in the sentence
+// the transport rendered; what the prompt lists is what a refusal MEANS and what to do about it,
+// and those are the same for all three - too much data, ask a narrower question. A second guide
+// would put a second entry under one variant name and give an agent two paragraphs saying one
+// thing.
 const RESULT_TOO_LARGE: Guide = Guide {
     reason: "result_too_large",
-    meaning: "the answer was too much data to certify - more rows than the cap, or more than the \
-              data system would return at once - and it was refused rather than cut short",
+    meaning: "the answer was too much data to certify - more rows than the cap, more than the data \
+              system would return at once, or more bytes than this deployment will encode into a \
+              response - and it was refused rather than cut short",
     remedy: "Narrow the period, drop a dimension, or add a filter, and ask again. Nothing partial \
              is returned and nothing will be: a total over some of the groups is a different number \
              wearing the same name. Retrying the same question returns the same refusal. The \
-             refusal names the row cap where the cap is what fired; where the data system's own \
-             bound is, there is no number to read, so narrow by a visible step rather than \
-             computing one.",
+             refusal names a number where one exists - the row cap, or this deployment's own byte \
+             ceiling - and where the data system's own bound is, there is no number to read, so \
+             narrow by a visible step rather than computing one.",
 };
 
 const TIME_RANGE_TOO_LONG: Guide = Guide {
@@ -203,6 +205,32 @@ const SOURCE_REFUSED: Guide = Guide {
              would be needed.",
 };
 
+const DEADLINE_EXCEEDED: Guide = Guide {
+    reason: "deadline_exceeded",
+    meaning: "this deployment stopped the question after its configured time budget, rather than \
+              let it keep running",
+    remedy: "Narrow the period, drop a dimension, or add a filter, and ask again. Retrying the \
+             same question unchanged returns the same refusal: the budget is a configured number, \
+             not a passing condition, so this is not an outage to wait out.",
+};
+
+// Usually the one guide that says wait rather than narrow - every other entry either has a change
+// that helps or has none at all, and most of the time this is the one refusal where the SAME
+// question, unmodified, becomes answerable once the window resets (`docs/adr/0030`). The one
+// exception the remedy below states: a question whose OWN estimate already exceeds the ceiling is
+// refused every window, forever, and waiting is the false remedy there - narrowing is the true one.
+const BUDGET_EXHAUSTED: Guide = Guide {
+    reason: "budget_exhausted",
+    meaning: "the person you are acting for has spent this deployment's per-replica byte ceiling \
+              for the current window",
+    remedy: "Usually, do not narrow the question: the ceiling is about how much has already been \
+             spent, not about this question's shape, so wait for the window named in the refusal \
+             to reset and ask exactly the same question again. If the SAME question is refused \
+             again immediately after a fresh window starts, its own estimate is over the ceiling \
+             by itself - waiting will never help that case, and narrowing the question is the only \
+             remedy.",
+};
+
 /// Every refusal a caller can be given, in the order the prompt lists them.
 ///
 /// Ordered so the ones an agent can act on come first and the two it cannot come last, because a
@@ -226,6 +254,13 @@ pub(super) const GUIDES: &[&Guide] = &[
     // Actionable, and last of the actionable ones: the remedy is the same narrowing
     // `ResultTooLarge` asks for, and an agent reaching this one has already read that.
     &RESOURCES_EXHAUSTED,
+    // Actionable, and grouped with `ResourcesExhausted` for the same reason: a configured bound
+    // this deployment enforces, not a passing outage, and the same narrowing remedy.
+    &DEADLINE_EXCEEDED,
+    // Grouped with the two configured-bound refusals above it rather than with the two an agent
+    // cannot act on at all: there IS a move, and it is unique among every entry here - wait, do
+    // not narrow.
+    &BUDGET_EXHAUSTED,
     &PLAN_SPANS_TOO_MANY_SOURCES,
     &FEDERATION_NOT_EXECUTABLE,
     &FEDERATION_LINK_AMBIGUOUS,
@@ -277,6 +312,8 @@ pub(super) const fn guide_for(reason: &RefusalReason) -> &'static Guide {
         RefusalReason::SourceRefused { .. } => &SOURCE_REFUSED,
         RefusalReason::CredentialUnavailable { .. } => &CREDENTIAL_UNAVAILABLE,
         RefusalReason::LegsDecideIdentityDifferently { .. } => &LEGS_DECIDE_IDENTITY_DIFFERENTLY,
+        RefusalReason::DeadlineExceeded { .. } => &DEADLINE_EXCEEDED,
+        RefusalReason::BudgetExhausted { .. } => &BUDGET_EXHAUSTED,
     }
 }
 

@@ -23,6 +23,7 @@ use sutura_domain::pinned::{DefinitionVersion, InvalidVersion};
 use crate::api::ApiSettings;
 use crate::catalog::{CatalogKind, CatalogSettings, Catalogs, InvalidCatalogSettings, UnknownCatalogKind};
 use crate::environment::{Environment, UnknownEnvironment};
+use crate::governance::SpendBudget;
 use crate::inbound::{InboundIdentity, InvalidAlgorithms, InvalidInboundValue};
 use crate::limits::{InvalidQuota, Quota, RateLimitSettings};
 use crate::prompt::{CatalogProse, InstructionsFile, InvalidPromptSettings, PromptSettings, UnknownCatalogProse};
@@ -306,8 +307,9 @@ pub enum SettingsError {
         #[source]
         cause: UnknownCatalogKind,
     },
-    #[error("`catalogs` holds a name that is not a catalog name")]
+    #[error("`catalogs.{written}` is not a catalog name")]
     CatalogName {
+        written: String,
         #[source]
         cause: InvalidIdentifier,
     },
@@ -368,7 +370,9 @@ pub struct Settings {
     catalogs: Catalogs,
     runtime: RuntimeSettings,
     prompt: PromptSettings,
+    tools: crate::tools::ToolsSettings,
     sources: SourceRegistry,
+    spend_budget: Option<SpendBudget>,
 }
 
 impl Settings {
@@ -419,8 +423,18 @@ impl Settings {
             catalogs: parse_catalogs(raw)?,
             runtime: parse_runtime(raw)?,
             prompt: parse_prompt(raw)?,
+            tools: parse_tools(raw),
+            spend_budget: parse_spend_budget(raw)?,
             sources,
         })
+    }
+
+    /// The tool surface's own settings - which capability beside the certified one this deployment
+    /// turned on.
+    #[inline]
+    #[must_use]
+    pub const fn tools(&self) -> &crate::tools::ToolsSettings {
+        &self.tools
     }
 
     /// Every reason this deployment will not be served, or an empty list.
@@ -450,6 +464,7 @@ impl Settings {
         refusals.extend(self.tls_refusals());
         refusals.extend(self.keying_refusals());
         refusals.extend(self.identity_refusals());
+        refusals.extend(self.run_sql_refusals());
         refusals.extend(self.credential_refusals(off_host));
         if self.environment.is_production() {
             if !self.rate_limit.enabled() {
@@ -525,6 +540,24 @@ impl Settings {
             }
         }
         refusals
+    }
+
+    /// Whether the raw SQL tool is enabled over a deployment it may not run over -
+    /// `docs/adr/0013`'s boot refusal, reusing the mode `identity_refusals` already reads.
+    ///
+    /// **What this crate can check, and no more.** Whether the LINKED adapter can actually accept a
+    /// raw statement, or carries a per-subject credential, is a property of the composed binary -
+    /// `sutura_domain::warehouse::Warehouse::ACCEPTS_RAW_STATEMENTS` and `::IMPERSONATION` - which
+    /// this crate never links. So this refuses `multi-user` unconditionally rather than only where an
+    /// adapter's declared shape makes it unsafe: today no build links an adapter that is both raw-
+    /// capable and per-subject-credential-capable, so the two questions have the same answer. The day
+    /// one exists, this refusal needs a composition-root counterpart the way the shared-source
+    /// acknowledgement check already has one.
+    fn run_sql_refusals(&self) -> Vec<NotFitToServe> {
+        if self.tools.run_sql_enabled() && self.security.identity() == Some(&DeploymentIdentity::SubjectPerRequest) {
+            return vec![NotFitToServe::RunSqlEnabledInMultiUserMode];
+        }
+        Vec::new()
     }
 
     /// Everything wrong with what a request has to present, and with where it presents it.
@@ -665,6 +698,16 @@ impl Settings {
         self.runtime
     }
 
+    /// The per-replica, in-process spend ceiling, if this deployment configured one.
+    ///
+    /// `None` is a real answer and not an unset field: `docs/adr/0030` decides that absence means
+    /// this replica counts nothing and refuses nothing on this account, which is the behaviour
+    /// every deployment had before this key existed.
+    #[inline]
+    pub const fn spend_budget(&self) -> Option<SpendBudget> {
+        self.spend_budget
+    }
+
     /// What goes into the agent-facing system prompt beyond the pinned bundle and the tool list.
     ///
     /// Read by the `prompt` command in `sutura-cli`, which renders what this deployment would hand
@@ -749,6 +792,16 @@ fn parse_sources(raw: &RawSettings, mode: Option<&DeploymentIdentity>) -> Result
             acknowledged_because: source.acknowledged_because.as_deref(),
             verification_identity: source.verification_identity.as_deref(),
             workload_identity: source.workload_identity.clone(),
+            host: source.host.as_deref(),
+            unix_socket: source.unix_socket.as_deref(),
+            port: source.port,
+            database: source.database.as_deref(),
+            user: source.user.as_deref(),
+            password_file: source.password_file.as_deref(),
+            transport_mode: source.transport_mode.as_deref(),
+            transport_anchors: source.transport_anchors.as_deref(),
+            client_certificate: source.client_certificate.as_deref(),
+            client_key: source.client_key.as_deref(),
         })
         .collect();
     SourceRegistry::parse(&entries, mode).map_err(|cause| SettingsError::Sources { cause })
@@ -800,7 +853,10 @@ fn parse_catalogs(raw: &RawSettings) -> Result<Catalogs, SettingsError> {
         // contribution manifest keys on the name and the composition root dispatches the kind, so
         // an entry that omits either is a declaration that cannot be opened. `kind` is parsed as a
         // closed set; an absent one was already defaulted by the raw shape.
-        let name = SourceName::parse(&raw_catalog.name).map_err(|cause| SettingsError::CatalogName { cause })?;
+        let name = SourceName::parse(&raw_catalog.name).map_err(|cause| SettingsError::CatalogName {
+            written: raw_catalog.name.clone(),
+            cause,
+        })?;
         let kind = CatalogKind::parse(&raw_catalog.kind).map_err(|cause| SettingsError::CatalogKind { cause })?;
         let version = DefinitionVersion::parse(&raw_catalog.version).map_err(|cause| SettingsError::Version { cause })?;
         let settings = CatalogSettings::parse(
@@ -838,6 +894,18 @@ fn parse_runtime(raw: &RawSettings) -> Result<RuntimeSettings, SettingsError> {
     Ok(RuntimeSettings::new(concurrency, admission, workers, working_set, grace))
 }
 
+/// The per-replica spend ceiling, if this deployment declared one.
+///
+/// `None` when `governance.per_replica_spend_ceiling` is absent - `docs/adr/0030`'s decision that
+/// no key means no ceiling, which is every deployment's behaviour before this key existed.
+fn parse_spend_budget(raw: &RawSettings) -> Result<Option<SpendBudget>, SettingsError> {
+    raw.governance
+        .per_replica_spend_ceiling
+        .as_ref()
+        .map(|ceiling| SpendBudget::parse(ceiling.bytes, ceiling.window_seconds).map_err(|cause| SettingsError::Bound { cause }))
+        .transpose()
+}
+
 /// The two keys that shape the agent-facing prompt.
 ///
 /// **An empty `instructions_file` is an error here, and that is the opposite of what
@@ -850,6 +918,13 @@ fn parse_runtime(raw: &RawSettings) -> Result<RuntimeSettings, SettingsError> {
 ///
 /// `catalog_prose` is branched on rather than required, so a deployment that removed the key from
 /// its own copy of the defaults gets the default rather than a deserialization failure.
+/// Infallible: a boolean has no invalid form. Named as its own function anyway, matching the other
+/// groups, so `Settings::parse` reads as one list of "read this section" calls rather than one
+/// inline and the rest not.
+const fn parse_tools(raw: &RawSettings) -> crate::tools::ToolsSettings {
+    crate::tools::ToolsSettings::new(raw.tools.run_sql.enabled)
+}
+
 fn parse_prompt(raw: &RawSettings) -> Result<PromptSettings, SettingsError> {
     let instructions = match raw.prompt.instructions_file.as_deref() {
         None => None,

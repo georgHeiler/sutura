@@ -20,12 +20,19 @@
 //! attempt is a 400 naming the field. The tool surface has no field for any of that - see
 //! `sutura_domain::query` - and this is what keeps that true across a JSON parser.
 
-use sutura_domain::calendar::{Date, TimeRange};
-use sutura_domain::catalog::DimensionValue;
-use sutura_domain::model::{DimensionName, Grain, MetricName};
+use sutura_domain::model::Grain;
 use sutura_domain::pinned::{PinnedDefinitions, Provenance};
-use sutura_domain::query::{Filter, Query, ToolOutcome};
+use sutura_domain::query::{Query, ToolOutcome};
+use sutura_domain::question::RawFilter;
 use sutura_domain::warehouse::RowSet;
+
+/// Why a body is not a question.
+///
+/// **Owned by `sutura-domain::question`, not by this transport.** HTTP's and MCP's field sets and
+/// typed refusals were identical - kept equal only by review - so the parse moved inward of both;
+/// this alias is what every existing reference to `crate::wire::MalformedQuestion` in this crate
+/// keeps meaning.
+pub type MalformedQuestion = sutura_domain::question::MalformedQuestion;
 
 /// Which status a refusal comes back as. Its own file because that is eleven judgements with a
 /// reason each, and they belong beside one another rather than scattered through this one.
@@ -33,6 +40,11 @@ use sutura_domain::warehouse::RowSet;
 /// [`RefusalBody`] stays here, with the other wire shapes, because it is part of the published
 /// interface description; only the decision moved.
 mod refusal;
+
+/// The raw SQL tool's own wire shape, kept apart from every certified shape above for the reason
+/// its own module documentation gives.
+pub mod raw;
+pub use raw::{MalformedStatement as RawMalformedStatement, RawOutcomeBody, RunSqlBody, RunSqlOutcome};
 
 /// A question, as it arrives.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -77,112 +89,29 @@ pub struct FilterBody {
     value: String,
 }
 
-/// Why a body is not a question.
-///
-/// Every variant names the field, and none of them echoes the caller's value back except where the
-/// value is the thing that failed to parse as an identifier - which is a bounded character set, not
-/// free text.
-#[derive(Debug, thiserror::Error)]
-pub enum MalformedQuestion {
-    #[error("`metric` is not a metric name")]
-    Metric {
-        #[source]
-        cause: sutura_domain::model::InvalidIdentifier,
-    },
-    #[error("`grain` is not one of: day, week, month, quarter, year")]
-    Grain { found: String },
-    #[error("`range.{field}` is not a date in `YYYY-MM-DD` form")]
-    Date {
-        field: &'static str,
-        #[source]
-        cause: sutura_domain::calendar::InvalidDate,
-    },
-    #[error("`range` is not a period")]
-    Range {
-        #[source]
-        cause: sutura_domain::calendar::InvalidTimeRange,
-    },
-    #[error("`dimensions[{index}]` is not a dimension name")]
-    Dimension {
-        index: usize,
-        #[source]
-        cause: sutura_domain::model::InvalidIdentifier,
-    },
-    #[error("`filters[{index}].dimension` is not a dimension name")]
-    FilterDimension {
-        index: usize,
-        #[source]
-        cause: sutura_domain::model::InvalidIdentifier,
-    },
-    /// The value is not one a catalog could have declared: nothing, more than one line, a control
-    /// character, an invisible or direction-changing code point, spacing a reader cannot see, or
-    /// longer than `sutura_domain::catalog::MAX_DIMENSION_VALUE_CHARS`.
-    ///
-    /// **The one variant with no `#[source]`, and the omission is the point.** Every other cause in
-    /// this enum either carries no caller text or carries text that already failed an identifier
-    /// parse, which is a few dozen ASCII bytes.
-    /// `sutura_domain::catalog::InvalidDimensionValue` carries the offending input, because it exists
-    /// for the author of a catalog - and a 400 body reaches a log, a UI and an agent's context, which
-    /// is the one place `sutura_domain::query::RefusalReason` is explicit that a caller's own text
-    /// must not arrive. So the field and the index are reported and the cause is dropped: the same
-    /// answer `DimensionValueNotAllowed` gives, at the boundary that now catches it earlier.
-    #[error("`filters[{index}].value` is not a value this catalog could declare")]
-    FilterValue { index: usize },
-}
-
 impl TryFrom<QuestionBody> for Query {
     type Error = MalformedQuestion;
 
+    /// Extracts this transport's own wire fields as plain strings and hands them to
+    /// `sutura_domain::question::parse_query` - the one place a caller's raw question becomes a
+    /// certified [`Query`], shared with `sutura-mcp`'s own `AskArgs`. Nothing transport-specific
+    /// happens here beyond the extraction: no field is renamed, widened or defaulted on the way
+    /// through.
     fn try_from(body: QuestionBody) -> Result<Self, Self::Error> {
-        let metric = MetricName::parse(&body.metric).map_err(|cause| MalformedQuestion::Metric { cause })?;
-        let grain = grain_of(&body.grain)?;
-        let range = range_of(&body.range)?;
-        let mut dimensions = Vec::with_capacity(body.dimensions.len());
-        for (index, raw) in body.dimensions.iter().enumerate() {
-            dimensions.push(DimensionName::parse(raw).map_err(|cause| MalformedQuestion::Dimension { index, cause })?);
-        }
-        let mut filters = Vec::with_capacity(body.filters.len());
-        for (index, raw) in body.filters.iter().enumerate() {
-            let dimension =
-                DimensionName::parse(&raw.dimension).map_err(|cause| MalformedQuestion::FilterDimension { index, cause })?;
-            // The discard IS the control, so it is spelled out rather than lint-silenced by accident:
-            // `InvalidDimensionValue` names the offending text because it exists for the author of a
-            // catalog, and this error becomes a 400 body that reaches a log, a UI and an agent's
-            // context. `sutura_domain::query::RefusalReason` is explicit that a caller's own text
-            // must not arrive there.
-            #[expect(
-                clippy::map_err_ignore,
-                reason = "the parse error carries the caller's own text, and a 400 body must not \
-                          reflect it back - see MalformedQuestion::FilterValue"
-            )]
-            let value = DimensionValue::parse(&raw.value).map_err(|_| MalformedQuestion::FilterValue { index })?;
-            filters.push(Filter::new(dimension, value));
-        }
-        Ok(Self::new(metric, grain, range, dimensions, filters))
+        let filters: Vec<RawFilter<'_>> = body
+            .filters
+            .iter()
+            .map(|filter| RawFilter::new(&filter.dimension, &filter.value))
+            .collect();
+        sutura_domain::question::parse_query(
+            &body.metric,
+            &body.grain,
+            &body.range.start,
+            &body.range.end,
+            &body.dimensions,
+            &filters,
+        )
     }
-}
-
-/// The grain, from its name.
-///
-/// A hand-written match rather than the derived `Deserialize`, so the error names the accepted set
-/// instead of quoting serde at a caller.
-fn grain_of(raw: &str) -> Result<Grain, MalformedQuestion> {
-    match raw {
-        "day" => Ok(Grain::Day),
-        "week" => Ok(Grain::Week),
-        "month" => Ok(Grain::Month),
-        "quarter" => Ok(Grain::Quarter),
-        "year" => Ok(Grain::Year),
-        other => Err(MalformedQuestion::Grain {
-            found: String::from(other),
-        }),
-    }
-}
-
-fn range_of(body: &RangeBody) -> Result<TimeRange, MalformedQuestion> {
-    let start = Date::parse(&body.start).map_err(|cause| MalformedQuestion::Date { field: "start", cause })?;
-    let end = Date::parse(&body.end).map_err(|cause| MalformedQuestion::Date { field: "end", cause })?;
-    TimeRange::new(start, end).map_err(|cause| MalformedQuestion::Range { cause })
 }
 
 // ---------------------------------------------------------------- responses ----
@@ -313,6 +242,7 @@ impl RefusalBody {
 pub struct Outcome {
     status: axum::http::StatusCode,
     body: OutcomeBody,
+    retry_after_seconds: Option<u64>,
 }
 
 impl Outcome {
@@ -343,11 +273,14 @@ impl From<&ToolOutcome> for Outcome {
                     columns: rows.columns().to_vec(),
                     rows: render(rows),
                 },
+                retry_after_seconds: None,
             },
             ToolOutcome::Refusal { ref reason } => {
+                let retry_after_seconds = refusal::retry_after(reason);
                 let (status, reason) = refusal::refused(reason);
                 Self {
                     status,
+                    retry_after_seconds,
                     body: OutcomeBody::Refusal { reason },
                 }
             }
@@ -356,17 +289,29 @@ impl From<&ToolOutcome> for Outcome {
 }
 
 impl axum::response::IntoResponse for Outcome {
-    /// The status and the body, and no headers of its own.
+    /// The status and the body, plus a `Retry-After` where the refusal names a fact rather than a
+    /// guess.
     ///
-    /// No `Retry-After`, on any refusal. See [`refusal::refused`]: the rule this surface already had
-    /// is a number that is already known or no header, and nothing here knows when a data system
-    /// comes back.
+    /// **Two arms, not an always-present header with a sentinel** - the same shape
+    /// `crate::problem::Failure::into_response` already uses, and for the same reason:
+    /// `Retry-After: 0` is a promise the next request will be answered, and a header that is
+    /// sometimes invented is worse than one that is sometimes absent. Every refusal but
+    /// `budget_exhausted` carries `None` here: nothing else on this surface knows when its answer
+    /// changes, and [`refusal::retry_after`] is the one place that decides which does.
     fn into_response(self) -> axum::response::Response {
         let outcome = match &self.body {
             OutcomeBody::Answer { rows, .. } => crate::metrics::QuestionOutcome::answered(rows.len()),
             OutcomeBody::Refusal { .. } => crate::metrics::QuestionOutcome::refused(),
         };
-        let mut response = (self.status, axum::Json(self.body)).into_response();
+        let mut response = match self.retry_after_seconds {
+            Some(seconds) => (
+                self.status,
+                [(axum::http::header::RETRY_AFTER, seconds.to_string())],
+                axum::Json(self.body),
+            )
+                .into_response(),
+            None => (self.status, axum::Json(self.body)).into_response(),
+        };
         response.extensions_mut().insert(outcome);
         response
     }
@@ -539,6 +484,8 @@ impl CatalogBody {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
     use sutura_domain::model::{DimensionName, Grain, MetricName};
     use sutura_domain::query::{Query, RefusalReason, ToolOutcome};
 
@@ -617,11 +564,44 @@ mod tests {
     }
 
     #[test]
+    fn a_spent_budget_reaches_the_response_as_429_with_a_retry_after_header() {
+        // `docs/adr/0030`'s own claim, at the layer that builds the actual response: the ONE
+        // refusal on this surface whose `Outcome::into_response` attaches a `Retry-After`, over the
+        // conversion `axum::serve` uses for real - not a helper this test writes its own copy of.
+        let outcome = ToolOutcome::Refusal {
+            reason: RefusalReason::BudgetExhausted { reset_after_seconds: 41 },
+        };
+        let response = Outcome::from(&outcome).into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .expect("a spent budget must carry a Retry-After");
+        assert_eq!(retry_after, "41");
+    }
+
+    #[test]
+    fn an_ordinary_refusal_carries_no_retry_after() {
+        // The control for the cell above: every OTHER refusal invents no header, which is the
+        // property `Outcome::into_response`'s own doc comment now states.
+        let response = Outcome::from(&ToolOutcome::Refusal {
+            reason: RefusalReason::MetricUnknown {
+                metric: MetricName::parse("revenue").expect("a test metric is a metric"),
+            },
+        })
+        .into_response();
+        assert!(
+            response.headers().get(axum::http::header::RETRY_AFTER).is_none(),
+            "an ordinary refusal must not invent a Retry-After"
+        );
+    }
+
+    #[test]
     fn a_malformed_field_names_the_field_it_was() {
         // A caller fixing a request needs to know which field, and a serde message does not say.
         let error = parse(r#"{"metric":"revenue","grain":"fortnight","range":{"start":"2026-06-01","end":"2026-07-01"}}"#)
             .expect_err("`fortnight` is not a grain");
-        assert!(matches!(error, MalformedQuestion::Grain { .. }), "{error:?}");
+        assert!(matches!(error, MalformedQuestion::Grain), "{error:?}");
         assert!(error.to_string().contains("quarter"), "{error}");
 
         let error = parse(r#"{"metric":"revenue","grain":"month","range":{"start":"nope","end":"2026-07-01"}}"#)

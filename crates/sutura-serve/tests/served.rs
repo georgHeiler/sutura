@@ -77,9 +77,11 @@ mod tests {
     use crate::harness::reading::Reading;
     use crate::harness::{
         LOCAL_SOURCE, LOOKUP_SOURCE, LOOPBACK, RECORD, RESOURCE, SINGLE_USER, TOKEN, VERSION, accepted_by, an_issuer, deployment,
-        example_root, position, question, recurring_revenue_by_region, recurring_revenue_june, refused_to_start,
+        example_root, position, question, recurring_revenue_by_region, recurring_revenue_june, refused_to_start, settings,
         settings_declaring_inbound, settings_spanning_two_sources, start, start_configured, v1, written,
     };
+    #[cfg(feature = "postgres")]
+    use crate::harness::{postgres_raw_sql_settings, postgres_settings};
 
     // ------------------------------------------------------------------- the harness itself ---
 
@@ -241,6 +243,110 @@ mod tests {
         assert_eq!(
             body["executed_as"],
             serde_json::json!([{ "source": "local", "posture": "shared-service-user" }])
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn a_postgres_source_answers_a_certified_question_from_the_served_binary() {
+        // `_fixture_lock` is held for the whole test, not just the load above it - see
+        // `FixtureLoadGuard`'s own documentation for the reload/read race releasing it early left
+        // open between this cell and the raw-sql one below.
+        let Some((settings, _fixture_lock)) = postgres_settings("postgres-answer") else {
+            return;
+        };
+        let served = start_configured("postgres-answer", &settings);
+        let reply = served.post(
+            &v1(sutura_http::constants::base_paths::QUERY),
+            Some(TOKEN),
+            &recurring_revenue_june(),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["outcome"], "answer", "{}", reply.body);
+        assert_eq!(body["columns"], serde_json::json!(["period", "recurring_revenue"]));
+        assert_eq!(body["rows"], serde_json::json!([["2026-06-01", "202121"]]));
+        assert_eq!(
+            body["executed_as"],
+            serde_json::json!([{ "source": LOCAL_SOURCE, "posture": "shared-service-user" }])
+        );
+    }
+
+    /// `examples/raw-sql` exists and is self-consistent, whether or not this build carries the
+    /// `postgres` feature or a tier is up.
+    ///
+    /// **Unconditional on purpose.** `a_postgres_source_answers_a_raw_sql_statement_from_the_served_binary`
+    /// below is the real proof, but it is `#[cfg(feature = "postgres")]` - `cargo xtask
+    /// check-examples` does not count a cell decided by a feature flag as evidence for the
+    /// directory it names, because a build without that feature never reaches it at all. This cell
+    /// is what a default build still holds: the settings snippet and the worked question the README
+    /// shows are exactly the ones the feature-gated cell sends and receives, so an edit to one
+    /// without the other is caught here even on a machine with no Postgres tier.
+    #[test]
+    fn the_raw_sql_example_readme_documents_the_settings_and_question_it_shows() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/raw-sql/README.md"))
+            .expect("examples/raw-sql/README.md is readable");
+        assert!(
+            readme.contains("tools:\n  run_sql:\n    enabled: true"),
+            "the README no longer shows the settings key that turns the tool on"
+        );
+        assert!(
+            readme.contains("select segment, count(*) as customers from dim_customer group by segment order by segment"),
+            "the README no longer quotes the statement the feature-gated cell below sends"
+        );
+    }
+
+    /// `examples/raw-sql`'s showcase, run for real: `docs/adr/0013`'s tool, over a real Postgres
+    /// tier, through the real composed binary - the same shape
+    /// `a_postgres_source_answers_a_certified_question_from_the_served_binary` proves for the
+    /// certified path, over `POST /v1/sql/run` instead of `POST /v1/query`.
+    ///
+    /// The question - how many customers are in each segment - is asked with no metric defined for
+    /// it: `examples/single-player/catalog` has no such metric, so this is the ADR's own "a database
+    /// with DDL and comments and no semantic layer" case, not a metric this deployment could have
+    /// answered the certified way. `examples/raw-sql/README.md` quotes exactly this request and
+    /// exactly this response - nothing in that file is asserted independently of what the binary
+    /// printed here.
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn a_postgres_source_answers_a_raw_sql_statement_from_the_served_binary() {
+        // Held for the whole test, for the same reason the certified cell above holds its own -
+        // see `FixtureLoadGuard`'s own documentation.
+        let Some((settings, _fixture_lock)) = postgres_raw_sql_settings("postgres-run-sql") else {
+            return;
+        };
+        let served = start_configured("postgres-run-sql", &settings);
+        let reply = served.post(
+            &v1(sutura_http::constants::base_paths::RUN_SQL),
+            Some(TOKEN),
+            r#"{"statement":"select segment, count(*) as customers from dim_customer group by segment order by segment"}"#,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let body = reply.json();
+        assert_eq!(body["outcome"], "raw_rows", "{}", reply.body);
+        assert_eq!(body["columns"], serde_json::json!(["segment", "customers"]));
+        assert_eq!(
+            body["rows"],
+            serde_json::json!([["business", "12"], ["consumer", "27"], ["wholesale", "1"]]),
+            "{}",
+            reply.body
+        );
+        // The load-bearing negative, restated at the transport a stranger actually reads: no field
+        // this response carries could be mistaken for the certified shape above.
+        assert!(body.get("provenance").is_none(), "{}", reply.body);
+        assert!(body.get("executed_as").is_none(), "{}", reply.body);
+
+        // `examples/raw-sql/README.md` quotes exactly this request and exactly this response -
+        // read here so a hand edit to either side is caught by this test rather than trusted.
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/raw-sql/README.md"))
+            .expect("examples/raw-sql/README.md is readable");
+        assert!(
+            readme.contains("select segment, count(*) as customers from dim_customer group by segment order by segment"),
+            "the README no longer quotes the statement this test sends"
+        );
+        assert!(
+            readme.contains(r#""rows": [["business", "12"], ["consumer", "27"], ["wholesale", "1"]]"#),
+            "the README no longer quotes the response this test received"
         );
     }
 
@@ -430,7 +536,12 @@ mod tests {
         // capability is covered by this test the day it is added - and a route that is mounted,
         // governed and MISSING from the document fails here rather than at whoever generated a
         // client from it.
-        let served = start("document");
+        //
+        // `tools.run_sql.enabled: true`: `#666`'s review, finding 2 - an off deployment does not
+        // document `/sql/run` at all (the same absence `tools/list` gives it), so `governed()`'s
+        // static table and the served document can only agree here with the switch on.
+        let with_run_sql = format!("{}tools:\n  run_sql:\n    enabled: true\n", settings(&example_root()));
+        let served = start_configured("document", &with_run_sql);
         let reply = served.get(sutura_http::constants::OPENAPI_JSON_PATH, Some(TOKEN));
         assert_eq!(reply.status, 200, "{}", reply.body);
         let document = reply.json();
@@ -448,11 +559,11 @@ mod tests {
                 route.route()
             );
         }
-        // Liveness is outside the version prefix and still described, which is what an orchestrator
-        // reads the document for.
+        // Liveness is outside the governed interface description. It remains mounted and public,
+        // but it is a process probe rather than an operation a client may invoke.
         assert!(
-            !document["paths"][sutura_http::constants::HEALTH_PATH].is_null(),
-            "the served document does not describe the liveness probe: {}",
+            document["paths"][sutura_http::constants::HEALTH_PATH].is_null(),
+            "the served document describes the liveness probe: {}",
             document["paths"]
         );
     }

@@ -726,9 +726,25 @@ dev-endpoints:
 dev-down:
     cargo run -q -p xtask -- dev-down
 
+
+# Remove only the demo service and its named volume, leaving every other worktree service alone.
+dev-down-demo:
+    cargo run -q -p xtask -- dev-down --only demo
+
 # What `just dev-down` would remove, and what it would deliberately spare. Removes nothing.
 dev-down-dry:
     cargo run -q -p xtask -- dev-down --dry-run
+
+# Is this worktree clear of compose resources? The EXIT CODE is the answer - 0 clear, 1 this
+# worktree holds resources, 3 the runtime did not say - so a caller writes `just dev-clear ||
+# refuse` instead of matching the sentence `just dev-down-dry` prints. Removes nothing, and unknown
+# refuses: a script that treated "I could not look" as "nothing there" would arm a teardown over it.
+dev-clear:
+    cargo run -q -p xtask -- dev-clear
+
+# Validate demo configuration without building, starting containers or contacting a model.
+demo-check:
+    bash demo/start.sh --check
 
 # NOT a gate, deliberately - the plan's own rule and #595's: a demo that fails a gate gets disabled,
 # and a disabled demo holds nothing. It needs a language model, which no gate has. The configuration,

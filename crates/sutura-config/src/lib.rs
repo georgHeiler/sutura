@@ -104,6 +104,7 @@ pub mod api;
 pub mod catalog;
 pub mod credentials;
 pub mod environment;
+pub mod governance;
 pub mod inbound;
 pub mod limits;
 pub mod prompt;
@@ -113,6 +114,7 @@ pub mod security;
 pub mod server;
 pub mod sources;
 pub mod telemetry;
+pub mod tools;
 
 mod raw;
 mod settings;
@@ -121,6 +123,7 @@ pub use crate::api::ApiSettings;
 pub use crate::catalog::{CatalogKind, CatalogSettings, Catalogs, InvalidCatalogSettings, UnknownCatalogKind};
 pub use crate::credentials::{StaticCredentialBroker, StaticCredentialsUnusable};
 pub use crate::environment::{Environment, UnknownEnvironment};
+pub use crate::governance::SpendBudget;
 pub use crate::inbound::{
     InboundIdentity, InvalidAlgorithms, InvalidInboundValue, IssuerUrl, KeyFamily, KeySetFile, PinnedAlgorithms, ProofHeader,
     ProofLifetime, RequiredTokenType, ResourceIdentifier, SigningAlgorithm, TokenLocation, TokenRequirement, TokenType,
@@ -143,10 +146,13 @@ pub use crate::settings::{
     CONFIG_DIR_VARIABLE, ConfigLayers, ENVIRONMENT_VARIABLE, NotFitToServe, Settings, SettingsError, SettingsLoadError, Sources,
     VARIABLE_PREFIX, VARIABLE_SEPARATOR, config_dir_from_process, configuration_variables_from_process, environment_from_process,
 };
-pub use crate::sources::placement::{BillingProject, DatasetId, InvalidResourceName, SourcePlacement};
+pub use crate::sources::placement::{
+    BillingProject, DatasetId, HostName, InvalidHostName, InvalidResourceName, PostgresDial, SourcePlacement,
+};
 pub use crate::sources::{
     ConfiguredSource, InvalidSourceRegistry, SourceKind, SourceRegistry, UnknownPosture, UnknownSourceKind,
 };
 pub use crate::telemetry::{
     InvalidLogFilter, InvalidServiceName, LogFilter, LogFormat, ServiceName, TelemetrySettings, UnknownLogFormat,
 };
+pub use crate::tools::ToolsSettings;

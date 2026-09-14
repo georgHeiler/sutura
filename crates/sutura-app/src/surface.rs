@@ -8,8 +8,8 @@
 //! handler cannot be generic over the warehouse without the whole router becoming generic in it,
 //! and the generated document becoming generic in it too.
 //!
-//! [`Surface`] is the seam: this crate's two operations, with `W` gone - and with the audit sink's
-//! own parameter gone for the same reason, since [`LocalService`] is generic in that too.
+//! [`Surface`] is the seam: this crate's operations, with `W` gone - and with the audit sink's own
+//! parameter gone for the same reason, since [`LocalService`] is generic in that too.
 //!
 //! # Why it is HERE and not in the transport that uses it
 //!
@@ -35,8 +35,8 @@
 //! crate made the application's interface the property of one of its callers.
 //!
 //! **Is the erasure an application concern or an HTTP one?** The *trigger* is an HTTP fact: a
-//! handler is a concrete function. The *content* is not - `definitions` and `answer` are this
-//! crate's own two operations, and [`LocalService::start`] is [`crate::verify_and_validate`] with
+//! handler is a concrete function. The *content* is not - `definitions`, `answer` and `run_sql` are
+//! this crate's own operations, and [`LocalService::start`] is [`crate::verify_and_validate`] with
 //! the catalog port consumed. Nothing in this file names a framework type, which is checkable
 //! rather than asserted: `cargo xtask check-boundaries` fails on a framework anywhere in a tree it
 //! governs, and this file added no dependency to this crate's manifest. A shape the application can
@@ -84,7 +84,9 @@ use sutura_domain::identity::{CredentialBroker, RequestContext};
 use sutura_domain::pinned::{NotValidated, PinnedDefinitions, SemanticCatalog};
 use sutura_domain::query::{Query, ToolOutcome};
 use sutura_domain::warehouse::Warehouse;
+use sutura_domain::warehouse::deadline::Deadline;
 
+use crate::spend::SpendLedger;
 use crate::warehouses::Warehouses;
 use crate::{ServiceError, Validated, verify_and_validate};
 
@@ -119,7 +121,36 @@ pub trait Surface: Send + Sync + 'static {
     /// returns**. That ordering is the requirement rather than an optimisation: a record written
     /// after the response is the record a crash loses, and the call worth having a record of is the
     /// one that went wrong.
-    fn answer(&self, context: &RequestContext, query: &Query) -> Result<ToolOutcome, SurfaceFailure>;
+    ///
+    /// # The deadline is opened by the transport, before this call
+    ///
+    /// `deadline` is one absolute [`Deadline`], opened at the instant the request arrived - before
+    /// admission, so the wait for a concurrency slot sits inside the caller's own bound rather than
+    /// adds to it. Taking it here, as a parameter rather than a field this trait's own state holds,
+    /// is the same shape the working-set ceiling already uses: a transport cannot forget to open one
+    /// because there is nowhere else for the value to come from. `docs/adr/0029` is the record; in
+    /// this slice the deadline is carried through to the port and refused on when already spent, and
+    /// nothing yet stops a data system mid-call with it.
+    fn answer(&self, context: &RequestContext, query: &Query, deadline: Deadline) -> Result<ToolOutcome, SurfaceFailure>;
+
+    /// Runs one literal statement against this deployment's configured source, or says why it will
+    /// not - the raw SQL tool, `docs/adr/0013`.
+    ///
+    /// Same shape as [`Self::answer`] in every way that matters: a refusal comes back inside the
+    /// `Ok` as [`sutura_domain::raw::RawOutcome::Refusal`], never as an `Err`, and the implementation
+    /// writes one record per outcome before this returns. What differs is the vocabulary - see
+    /// [`sutura_domain::raw`] for why it is not [`ToolOutcome`] wearing a second name.
+    ///
+    /// No `deadline` parameter: `docs/adr/0029`'s threading landed for `answer`/`execute_leg` only in
+    /// the slice that added it, and this tool has no `LIMIT`-bearing plan for it to bound - the row
+    /// cap and the connect-time `statement_timeout` are its only bounds today (`crates/
+    /// sutura-exec-postgres/src/raw.rs`). Threading a deadline through this path too is future work,
+    /// not decided here.
+    fn run_sql(
+        &self,
+        context: &RequestContext,
+        statement: &sutura_domain::raw::RawStatement,
+    ) -> Result<sutura_domain::raw::RawOutcome, SurfaceFailure>;
 }
 
 /// A typed error, owned, with its type erased and its `#[source]` chain intact.
@@ -275,12 +306,19 @@ pub enum ServiceNotStarted {
 /// answer mints once, for every source its plan reads, and `sutura_domain::warehouse::Warehouse`
 /// has no signature that runs without the result - so a service with no broker is not a service
 /// that answers as the process, it is a service that does not compile.
+/// **It also holds the spend ledger, unbounded unless a composition root opts in.** `Self::start`
+/// and `Self::start_composed` build one with [`SpendLedger::no_budget`] - today's behaviour, before
+/// this counter existed - and [`Self::with_spend_ledger`] is how a root that read a configured
+/// ceiling out of its settings replaces it. Not a constructor argument, unlike every other field
+/// here: those are what a service cannot exist without, and an unbounded ledger is a real, working
+/// default rather than an omission this type should refuse to start without.
 pub struct LocalService<W, S, B> {
     definitions: Validated<PinnedDefinitions>,
     warehouses: Warehouses<W>,
     sink: S,
     broker: B,
     working_set_bytes: u64,
+    spend_ledger: SpendLedger,
 }
 
 impl<W, S, B> LocalService<W, S, B>
@@ -340,7 +378,7 @@ where
                 .map_err(|cause| ServiceNotStarted::Catalog { cause: Box::new(cause) })?;
             bundles.push(pinned);
         }
-        let pinned = crate::assemble::assemble(bundles).map_err(|cause| ServiceNotStarted::Composition { cause })?;
+        let pinned = crate::assemble::assemble(&bundles).map_err(|cause| ServiceNotStarted::Composition { cause })?;
         // The broker is NOT consulted here, and that is the boot path's whole shape: an anchor runs
         // through `Warehouse::verify_anchor`, which takes no credential because there is no caller to
         // mint one for. `docs/adr/0008` part 1 decides it, and `sutura_domain::warehouse` records
@@ -352,7 +390,21 @@ where
             sink,
             broker,
             working_set_bytes,
+            spend_ledger: SpendLedger::no_budget(),
         })
+    }
+
+    /// Replaces the spend ledger, for a composition root that read a configured per-replica
+    /// ceiling out of its settings.
+    ///
+    /// A setter rather than a constructor argument, so every existing caller of [`Self::start`] and
+    /// [`Self::start_composed`] - most of which configure no ceiling at all - keeps its original
+    /// argument list. `docs/adr/0030` is the record; `governance.per_replica_spend_ceiling` absent
+    /// is the state every one of those callers is already in.
+    #[must_use]
+    pub fn with_spend_ledger(mut self, spend_ledger: SpendLedger) -> Self {
+        self.spend_ledger = spend_ledger;
+        self
     }
 }
 
@@ -368,7 +420,7 @@ where
         self.definitions.get()
     }
 
-    fn answer(&self, context: &RequestContext, query: &Query) -> Result<ToolOutcome, SurfaceFailure> {
+    fn answer(&self, context: &RequestContext, query: &Query, deadline: Deadline) -> Result<ToolOutcome, SurfaceFailure> {
         let answered = crate::answer(
             &self.definitions,
             query,
@@ -376,6 +428,8 @@ where
             &self.broker,
             &self.warehouses,
             self.working_set_bytes,
+            deadline,
+            &self.spend_ledger,
         )
         .map_err(|error| match error {
             // The generic parameter is what cannot survive; the VALUE does, boxed, with its own
@@ -413,6 +467,34 @@ where
         ));
         Ok(answered.into_outcome())
     }
+
+    fn run_sql(
+        &self,
+        context: &RequestContext,
+        statement: &sutura_domain::raw::RawStatement,
+    ) -> Result<sutura_domain::raw::RawOutcome, SurfaceFailure> {
+        let answered = crate::run_sql(context, statement, &self.broker, &self.warehouses).map_err(|error| match error {
+            crate::RunSqlError::Broker { cause } => SurfaceFailure::Broker { cause: Box::new(cause) },
+            crate::RunSqlError::Credentials { cause } => SurfaceFailure::Miswired { cause: Box::new(cause) },
+            crate::RunSqlError::Posture { cause } => SurfaceFailure::Miswired { cause: Box::new(cause) },
+            // A boot refusal is supposed to make this unreachable in a running deployment - see
+            // `sutura_config`'s own refusal over `DeploymentIdentity` and the adapter's declared
+            // `Warehouse::ACCEPTS_RAW_STATEMENTS`. Reported as a wiring defect rather than panicking,
+            // because a port that CAN return this is a port whose contract says it might.
+            crate::RunSqlError::NoAcceptingSource => SurfaceFailure::Miswired {
+                cause: Box::new(crate::RunSqlError::<B::Error>::NoAcceptingSource),
+            },
+        })?;
+        // Same ordering as `answer`: written before the `Ok`, both outcomes reaching it, so a raw
+        // call is recorded exactly as reliably as a certified one.
+        self.sink.record(&CallRecord::of_raw(
+            context.chain(),
+            statement,
+            answered.outcome(),
+            answered.executed_until(),
+        ));
+        Ok(answered.into_outcome())
+    }
 }
 
 impl<W, S, B> core::fmt::Debug for LocalService<W, S, B> {
@@ -423,5 +505,177 @@ impl<W, S, B> core::fmt::Debug for LocalService<W, S, B> {
             .field("definition_version", &self.definitions.get().version())
             .field("definition_digest", &self.definitions.get().digest())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sutura_domain::model::Grain;
+    use sutura_domain::pinned::NotValidated;
+    use sutura_domain::query::Query;
+
+    use super::{LocalService, ServiceNotStarted, Surface as _};
+    use crate::tests::{asked_by_a_person, june, metric, shared, source};
+    use crate::tests_support::{
+        AuthoredWarehouse, DiscardingAuditSink, FixedBroker, FixedCatalog, RawCapableWarehouse, authored_bundle, bundle_over,
+    };
+    use crate::{Warehouses, verify_and_validate};
+
+    #[test]
+    fn an_authored_metric_does_not_boot_against_the_in_process_engine() {
+        // The mechanism under test is `Warehouse::EXECUTES_AUTHORED_SQL` read inside
+        // `verify_and_validate`, through the real composition path and the one adapter every shipped
+        // binary links. Red on base by construction (`authored_bundle` cannot be built there); the
+        // compiled mutation is `const EXECUTES_AUTHORED_SQL: bool = true;` on `DataFusionWarehouse`,
+        // under which this test alone goes red.
+        let catalog = FixedCatalog::of(authored_bundle(metric(), source()));
+        let ceiling = core::num::NonZeroUsize::new(1 << 30).expect("a gibibyte is positive");
+        let engine = sutura_exec_datafusion::DataFusionWarehouse::new(
+            source(),
+            shared(),
+            sutura_exec_datafusion::WorkingSet::of_bytes(ceiling),
+        )
+        .expect("the in-process engine starts");
+        let error = LocalService::start(
+            &catalog,
+            Warehouses::of(engine),
+            DiscardingAuditSink,
+            FixedBroker::GrantsShared,
+            1 << 30,
+        )
+        .expect_err("the in-process engine cannot execute authored SQL");
+        let ServiceNotStarted::NotValidated { cause } = error else {
+            panic!("the authored computation must be the startup refusal: {error:?}");
+        };
+        assert_eq!(cause, NotValidated::AuthoredSqlNotExecutable { metric: metric() });
+    }
+
+    #[test]
+    fn the_authored_sql_example_does_not_boot_against_the_in_process_engine() {
+        // The other half of the fixture above, over the directory `examples/authored-sql` and the
+        // README under it actually claim about: not a hand-built bundle, but
+        // `LocalCatalog::load` through the real composition path `sutura query`, `sutura mcp` and
+        // `sutura-serve` all take. `LocalCatalog::capabilities()` is `everything()`
+        // (`crates/sutura-catalog-local/src/lib.rs`), so composing this directory first requires the
+        // example to carry every kind that declares: a second model, a relationship, a dimension
+        // reached through it, a required filter, an anchor, and the four knowledge documents. Red
+        // before those existed, at `CompositionError::Unfaithful` - a one-model, one-metric catalog
+        // does not compose, which a review of this checkpoint found before the example carried
+        // enough to reach the authored check at all. The compiled mutation is the same as the test
+        // above.
+        use std::path::Path;
+
+        use sutura_catalog_local::LocalCatalog;
+        use sutura_domain::pinned::DefinitionVersion;
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/authored-sql/catalog");
+        let version = DefinitionVersion::parse("authored-sql-example").expect("a fixed version is a version");
+        let catalog = LocalCatalog::new(source(), root, version);
+        let ceiling = core::num::NonZeroUsize::new(1 << 30).expect("a gibibyte is positive");
+        let engine = sutura_exec_datafusion::DataFusionWarehouse::new(
+            source(),
+            shared(),
+            sutura_exec_datafusion::WorkingSet::of_bytes(ceiling),
+        )
+        .expect("the in-process engine starts");
+        let error = LocalService::start(
+            &catalog,
+            Warehouses::of(engine),
+            DiscardingAuditSink,
+            FixedBroker::GrantsShared,
+            1 << 30,
+        )
+        .expect_err("the example carries an authored metric the in-process engine cannot execute");
+        let ServiceNotStarted::NotValidated { cause } = error else {
+            panic!("the example must compose and then hit the authored-SQL refusal: {error:?}");
+        };
+        let metric = sutura_domain::model::MetricName::parse("order_value_spread").expect("the example metric name is a name");
+        assert_eq!(cause, NotValidated::AuthoredSqlNotExecutable { metric });
+    }
+
+    #[test]
+    fn an_adapter_declaring_authored_sql_support_passes_only_the_capability_gate() {
+        // The other direction, so the gate above is a capability read and not an unconditional
+        // refusal of the key. What the declaring fake does NOT get is an answer: the plan carries no
+        // SQL, so the compiler names the metric rather than substituting a measure. No adapter this
+        // workspace ships makes the declaration; the fake exists to hold the gate's shape.
+        let pinned = authored_bundle(metric(), source());
+        verify_and_validate(pinned.clone(), &Warehouses::of(AuthoredWarehouse::new(source(), shared())))
+            .expect("the declaring fake passes startup because this bundle has no anchors");
+        let question = Query::new(metric(), Grain::Month, june(), Vec::new(), Vec::new());
+        let error = sutura_semantic::compile(&question, &pinned)
+            .expect_err("an authored computation has no representation in the semantic plan");
+        match error {
+            sutura_semantic::CompileFailure::AuthoredSqlNotPlanned { metric: failed } => assert_eq!(failed, metric()),
+            other => panic!("the compiler must name the authored metric rather than substitute a measure: {other:?}"),
+        }
+    }
+
+    /// `#666`'s review, finding 3: the constructor `CallRecord::of_raw` was tested directly, but
+    /// nothing reached `LocalService::run_sql`'s own `self.sink.record(...)` call - a mutation that
+    /// builds the record and never sinks it (`crates/sutura-app/src/surface.rs:449-454`) left the
+    /// whole suite green. This calls `run_sql` through the real `Surface` implementation, over a
+    /// sink that only a genuine `record` call can reach.
+    #[test]
+    fn run_sql_writes_one_record_per_outcome_carrying_the_statement_text() {
+        use sutura_domain::audit::{AuditSink, CallRecord, RecordedOutcome};
+        use sutura_domain::raw::RawStatement;
+
+        /// `Send + Sync + 'static`, without `std::sync::Mutex` (`clippy.toml` disallows it) or a
+        /// `tokio` dependency this crate does not have: a channel is `Sync` for a `Send` item and
+        /// needs neither.
+        struct RecordingSink {
+            sender: std::sync::mpsc::Sender<String>,
+        }
+
+        impl AuditSink for RecordingSink {
+            fn record(&self, record: &CallRecord<'_>) {
+                let statement = record.statement().map(|text| text.as_str().to_owned());
+                let line = match *record.outcome() {
+                    RecordedOutcome::RawAnswered { rows, .. } => format!("raw_answered rows={rows} statement={statement:?}"),
+                    RecordedOutcome::RawRefused { reason, .. } => {
+                        format!("raw_refused reason={reason:?} statement={statement:?}")
+                    }
+                    RecordedOutcome::Answered { .. } | RecordedOutcome::Refused { .. } => String::from("certified"),
+                };
+                drop(self.sender.send(line));
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // An empty catalog: no metric, so no anchor `LocalService::start` would re-run against
+        // this fake - `RawCapableWarehouse` answers only the raw path, deliberately, and boot must
+        // not touch the certified one to reach it.
+        let catalog = FixedCatalog::of(bundle_over(&[]));
+        let warehouse = RawCapableWarehouse::answering_rows(source(), shared(), 1);
+        let service = LocalService::start(
+            &catalog,
+            Warehouses::of(warehouse),
+            RecordingSink { sender },
+            FixedBroker::GrantsShared,
+            1 << 30,
+        )
+        .expect("an empty catalog with no anchors boots against any warehouse");
+
+        let context = asked_by_a_person();
+        let answered_statement = RawStatement::parse("select 1").expect("a test statement is a statement");
+        drop(
+            service
+                .run_sql(&context, &answered_statement)
+                .expect("the fake warehouse answers `select 1`"),
+        );
+        let refused_statement = RawStatement::parse("refuse me").expect("a test statement is a statement");
+        drop(
+            service
+                .run_sql(&context, &refused_statement)
+                .expect("a refusal is a result, not an `Err`"),
+        );
+
+        let lines: Vec<String> = receiver.try_iter().collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("raw_answered"), "{lines:?}");
+        assert!(lines[0].contains("select 1"), "{lines:?}");
+        assert!(lines[1].starts_with("raw_refused"), "{lines:?}");
+        assert!(lines[1].contains("refuse me"), "{lines:?}");
     }
 }

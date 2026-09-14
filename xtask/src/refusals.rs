@@ -53,7 +53,8 @@ const QUERY: Subject = Subject {
     name: "RefusalReason",
     declared_in: DECLARED_IN,
     allow_file: ALLOW_FILE,
-    variants: variants(19),
+    // 21: `docs/adr/0030-where-a-budget-lives.md` added `BudgetExhausted`.
+    variants: variants(21),
 };
 
 /// One refused deployment: the settings are not fit to serve and the process does not start.
@@ -61,7 +62,7 @@ const STARTUP: Subject = Subject {
     name: "NotFitToServe",
     declared_in: "crates/sutura-config/src/settings/posture.rs",
     allow_file: "devco/startup-refusals-unprovoked-allow",
-    variants: variants(14),
+    variants: variants(15),
 };
 
 /// One refused deployment again, and from the other side of the boot: the settings were fit and the
@@ -69,18 +70,29 @@ const STARTUP: Subject = Subject {
 ///
 /// **The asymmetry `github.com/telekom/sutura#428` is about.** A `RefusalReason` refuses one
 /// question; this refuses the whole deployment, and until it was enrolled the only thing holding
-/// its variants was whether an author happened to look. All six were named by tests already, which
-/// is what makes the enrolment free: what changes is that the seventh cannot arrive unnamed.
+/// its variants was whether an author happened to look. All seven are named by tests, which keeps
+/// the enrolment free: an eighth cannot arrive unnamed.
 const VALIDATION: Subject = Subject {
     name: "NotValidated",
     declared_in: "crates/sutura-domain/src/pinned.rs",
     allow_file: "devco/validation-refusals-unprovoked-allow",
-    variants: variants(6),
+    variants: variants(7),
+};
+
+/// One refused raw statement: `docs/adr/0013`'s tool, off by default, with its own narrower
+/// vocabulary - a row cap, a data-system volume bound, a statement that did not complete, and the
+/// data system refusing at the identity/authorization level. Never `RefusalReason`'s: that
+/// vocabulary is keyed to a compiled plan, and a raw statement has none.
+const RAW: Subject = Subject {
+    name: "RawRefusalReason",
+    declared_in: "crates/sutura-domain/src/raw.rs",
+    allow_file: "devco/raw-refusals-unprovoked-allow",
+    variants: variants(4),
 };
 
 /// Every enum this gate reads. Widening it is a diff here and nowhere else; see the module doc for
 /// the direction this list does NOT hold.
-const ENROLLED: [&Subject; 3] = [&QUERY, &STARTUP, &VALIDATION];
+const ENROLLED: [&Subject; 4] = [&QUERY, &STARTUP, &VALIDATION, &RAW];
 
 /// Two subjects sharing one allow file would share their exceptions, and
 /// `startup_exceptions_are_validated_and_do_not_cross_enum_boundaries` is the rule that forbids
@@ -733,7 +745,10 @@ mod tests {
             })
             .expect("every enrolled subject reached");
         assert_eq!(verdict, Verdict::Pass);
-        assert_eq!(reached, ["RefusalReason", "NotFitToServe", "NotValidated"]);
+        assert_eq!(
+            reached,
+            ["RefusalReason", "NotFitToServe", "NotValidated", "RawRefusalReason"]
+        );
     }
 
     /// A visitor's verdict is the gate's verdict, so `each` cannot fold a refusal away.
@@ -776,7 +791,7 @@ mod tests {
             .expect("every enrolled subject reached");
         assert_eq!(verdict, Verdict::Pass);
         assert!(unresolved.is_empty(), "enrolled subjects that do not resolve: {unresolved:?}");
-        assert_eq!(names, ["RefusalReason", "NotFitToServe", "NotValidated"]);
+        assert_eq!(names, ["RefusalReason", "NotFitToServe", "NotValidated", "RawRefusalReason"]);
     }
 
     /// Fabricated variant names throughout, so this module's own fixtures cannot be read as

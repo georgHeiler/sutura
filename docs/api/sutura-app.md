@@ -55,10 +55,58 @@ boundary gate bans `anyhow` for, arrived at by a different route.
 ### Variants
 
 - `Compile` - The pinned bundle would not compile this question, or the splitter built a two-source plan this workspace could not then assemble.
+
+  **Both are our own side being wrong, which is what keeps them out of a refusal.**
+  `telekom/sutura#338` is the second one's report: it used to arrive as
+  `RefusalReason::FederationNotExecutable`, which is what a build whose adapter type does not
+  declare `Warehouse::EXECUTES_LEGS` is told, so a wiring defect was indistinguishable from a
+  build that cannot run a leg. `sutura_semantic::CompileFailure` keeps them apart and keeps the
+  typed cause.
 - `Warehouse`
 - `Federated` - The federated combiner could not assemble the two legs' rows.
+
+  **An internal defect rather than a refusal, for every arm but the two `answer_federated`
+  maps by name.** A correctly split and certified question should not make the combiner fail: a
+  missing column or a malformed result is a bug in the splitter, an adapter or the combiner, so
+  it leaves as a failure the transport answers like a data-system outage. The two the answer
+  path turns into refusals are the two governance outcomes - `FederatedFailure::ResourcesExhausted`,
+  refused as `RefusalReason::ResourcesExhausted`, and the row cap, refused as
+  `RefusalReason::ResultTooLarge`.
 - `Broker` - The credential broker could not mint. Nothing about the question was wrong.
+
+  **Its own variant rather than a refusal, and its own variant rather than sharing the one
+  above.** A refusal would let a client library retry a governance decision until something
+  works, which is what `sutura_domain::query::ToolOutcome` exists to prevent. And sharing
+  `Warehouse` would collapse two causes a caller has to act on differently: `docs/adr/0014`
+  makes the point that a caller told "unavailable, retry" against an authorization-server
+  outage will retry successfully, while one told the same against a bound that fires again
+  retries forever.
 - `Posture` - The broker's answer does not agree with the request it was made for.
+
+  **A wiring defect between the broker and the request, so an `Err` and not a refusal** - the
+  question was fine. Four things can be wrong and the domain's own enum names them: the grant
+  was minted for a different subject, it covers a different set of sources, its deadline had
+  already passed, or the refusal named a source nobody asked about.
+
+  **It used to carry one of them**, a bare "nothing was granted for this source", and the other
+  three were not checked at all. Widening the cause rather than adding three variants is the
+  shape of the fix: they are one question asked once, and a transport that had to tell them
+  apart would be a transport making a judgement about our own wiring.
+
+  Executing anyway is the alternative this variant exists to remove, and it is the one that
+  would have run the leg as somebody other than the asker.
+  The leg the broker minted disagrees with the posture the adapter was opened with.
+
+  **Its own variant because the two values come from different places, and that is the whole of
+  what the comparison is worth.** The broker read the settings tree; the registry holds what the
+  composition root opened. A leg that says "the deployment's own identity" against a source
+  declared `impersonation-at-source` means one of those two is wrong about this deployment, and
+  executing anyway is the case that is silent: provenance is read off the ADAPTER's posture, so
+  the answer would have been reported as impersonated while it ran as the process.
+
+  Both shipped adapters make this comparison too, and this variant does not replace theirs - an
+  adapter is the last thing before a driver and may not assume who called it. What it replaces is
+  the assumption that every FUTURE adapter will remember to.
 - `Credentials`
 
 ### Implements
@@ -115,7 +163,7 @@ What the caller is told.
 ## `fn answer`
 
 ```rust
-pub fn answer<W, B>(definitions: &Validated<sutura_domain::pinned::PinnedDefinitions>, query: &sutura_domain::query::Query, context: &sutura_domain::identity::RequestContext, broker: &B, warehouses: &Warehouses<W>, working_set_bytes: u64) -> Answering<W, B>
+pub fn answer<W, B>(definitions: &Validated<sutura_domain::pinned::PinnedDefinitions>, query: &sutura_domain::query::Query, context: &sutura_domain::identity::RequestContext, broker: &B, warehouses: &Warehouses<W>, working_set_bytes: u64, deadline: sutura_domain::warehouse::deadline::Deadline, ledger: &SpendLedger) -> Answering<W, B>
 ```
 
 Answers one question, or says why it will not.
@@ -226,58 +274,6 @@ The data systems this process opened.
 Keyed by each adapter's own `Warehouse::source` rather than by a name the caller passes
 alongside it, so the key and the adapter cannot disagree about which source this is - the same
 reason `PinnedDefinitions::pin` computes its digest from the definitions it stores.
-
-## `use BootIdentity`
-
-The process's own static root identity, under which boot-time trust runs.
-
-The deployment's own word for who it is - `Subject::TheDeploymentItself` in the domain - and the
-identity `verify_anchor` and the shared-service-user legs run as. A marker rather than a
-credential, and deliberately a unit: there is one deployment, one value, and no way to confuse
-it with a caller. `BootRoot` holds exactly one of these, and nothing on the request path can
-mint one.
-
-## `use BootRoot`
-
-The single root of trust boot holds: the validated bundle and nothing a request needs.
-
-## A caller's assertion cannot make it in
-
-The constructor's second argument is the deployment's OWN identity, so a `RequestContext` is a
-compile error wherever a `BootRoot` is being built - the root cannot be handed, or repurposed
-to answer as, a caller.
-
-```compile_fail
-use sutura_app::{BootIdentity, BootRoot};
-use sutura_domain::identity::RequestContext;
-use sutura_domain::pinned::{NotValidated, PinnedDefinitions};
-use sutura_domain::warehouse::Warehouse;
-
-// No parameter takes a caller's assertion: the second argument is the root's own identity.
-fn _boot<W: Warehouse>(
-    pinned: PinnedDefinitions,
-    context: RequestContext,
-    warehouses: &sutura_app::Warehouses<W>,
-) -> Result<BootRoot, NotValidated> {
-    BootRoot::validate(pinned, context, warehouses)
-}
-```
-
-The twin, with the root's only other argument:
-
-```
-use sutura_app::{BootIdentity, BootRoot};
-use sutura_domain::pinned::{NotValidated, PinnedDefinitions};
-use sutura_domain::warehouse::Warehouse;
-
-fn _boot<W: Warehouse>(
-    pinned: PinnedDefinitions,
-    identity: BootIdentity,
-    warehouses: &sutura_app::Warehouses<W>,
-) -> Result<BootRoot, NotValidated> {
-    BootRoot::validate(pinned, identity, warehouses)
-}
-```
 
 ## `use Capability`
 
@@ -419,12 +415,95 @@ configured with - the process, for the file engine that ships - and the composit
 a bundle with an anchor on a source that declared no verification identity, which is the half
 available before the port changes.
 
+# What is refused before any anchor runs
+
+A metric whose computation is catalog-authored SQL, unless `W` declares
+`Warehouse::EXECUTES_AUTHORED_SQL`. The fragment is stored as written and nothing published
+compiles it, so an adapter taking the default cannot execute the metric; refusing the bundle
+here, naming the metric, is what stands between that and a served bundle with a metric that
+is silently skipped or a measure quietly substituted. Read off the ONE adapter type
+`Warehouses<W>` holds, the way `EXECUTES_LEGS` is - so it is a fact about the build, not
+about the data. No adapter this workspace ships opts in; `docs/adr/0004` is the decision.
+
+**"Before any anchor runs" is a placement, not an assertion.** It is true because this check
+sits ahead of `declared_keys::hold` and `verify_anchors` in the body below, and the ordering
+ahead of `declared_keys::hold` is held INCIDENTALLY, by the `examples/authored-sql` cell: that
+catalog declares a relationship and attaches no data to it, so a block moved below `hold`
+fails there first, on `declared_keys::hold`'s own refusal, rather than on this one. Nothing
+separates the placement from `verify_anchors` alone, and no fixture's fake counts an anchor
+or a declared key that was never touched.
+
+## `use SpendBudget`
+
+A byte ceiling and the window it resets on, already validated.
+
+A plain pair rather than a re-export of `sutura_config::SpendBudget`: this crate depends on
+nothing outside `sutura-domain`, `sutura-semantic` and `thiserror` - see this crate's own module
+documentation - and a composition root reads the validated ceiling and window out of its
+settings and hands the two primitives here, the same shape `working_set_bytes: u64` already
+uses for `RuntimeSettings::working_set`.
+
+## `use SpendLedger`
+
+The counter: one instance per process, consulted by every question this replica answers.
+
+**`&self`, not `&mut self`** - one ledger is shared by every request without a lock in this
+type's own signature, the same shape `sutura_domain::audit::AuditSink::record` uses for the same
+reason. The mutable state is inside a `Mutex` guarding the per-subject map.
+
 ## `type_alias Answering`
 
 What answering produced, or why it could not.
 
 A named alias because the inline form is over the complexity threshold in `clippy.toml`, and
 naming it is the better half of that trade: the generic parameter is a warehouse, not a result.
+
+## `use AnsweredRaw`
+
+One raw call's result: what the caller is told, and what it ran under - the
+`Answered` of the raw path, over `sutura_domain::raw::RawOutcome` rather
+than `ToolOutcome`.
+
+## `use RunSqlError`
+
+Why running a raw statement did not produce an outcome.
+
+**Deliberately not `ServiceError`.** That type's `Compile` and
+`Federated` arms describe the compiler and the splitter, neither of which this path touches - a
+raw statement is unparsed text, end to end. What is left is the credential half
+`answer` also has, plus one arm of its own for a state the boot refusal is
+supposed to make unreachable: the raw tool turned on over an adapter that does not accept raw
+text at all.
+
+## `use RunningRaw`
+
+What running a raw statement produced, or why it could not.
+
+## `use run_sql`
+
+Runs one literal statement against the deployment's configured source, or says why it will not.
+
+# PR1's scope, stated as a limit rather than left implicit
+
+**This targets the sole registered data system, and refuses `RunSqlError::NoAcceptingSource`
+where more than one is open or none is.** `docs/adr/0013`'s showcase is one Postgres source; a
+deployment naming which of several sources the raw tool may run over is future work, not a
+decision this function makes by omission - a second source is refused rather than guessed at.
+
+# Otherwise, this mirrors `answer`'s credential handling exactly
+
+Mint once, check the grant agrees with the request, check the presented leg agrees with the
+adapter's declared posture - the same three findings behind the same one guard, for the same
+reason: a broker is an adapter outside the hexagon, and its answer is input.
+
+# What is different from `answer` on the way out, and why
+
+**Every failure to execute becomes a refusal, never a `RunSqlError`.** The statement is the
+caller's own text, so a syntax error, a statement timeout, or the server refusing a write inside
+the read-only transaction `docs/adr/0013`'s amendment wraps every call in are all answers *about
+that statement* - not an infrastructure outage this deployment must page for. What remains an
+`Err` is only what happens before the statement ever reaches the data system: the broker not
+answering, or credentials that do not fit.
 
 ## Module `surface`
 
@@ -438,8 +517,8 @@ table by path, and named again by the macro that generates the interface descrip
 handler cannot be generic over the warehouse without the whole router becoming generic in it,
 and the generated document becoming generic in it too.
 
-`Surface` is the seam: this crate's two operations, with `W` gone - and with the audit sink's
-own parameter gone for the same reason, since `LocalService` is generic in that too.
+`Surface` is the seam: this crate's operations, with `W` gone - and with the audit sink's own
+parameter gone for the same reason, since `LocalService` is generic in that too.
 
 # Why it is HERE and not in the transport that uses it
 
@@ -465,8 +544,8 @@ at all, it is this crate's own service with one generic parameter erased. It hol
 crate made the application's interface the property of one of its callers.
 
 **Is the erasure an application concern or an HTTP one?** The *trigger* is an HTTP fact: a
-handler is a concrete function. The *content* is not - `definitions` and `answer` are this
-crate's own two operations, and `LocalService::start` is `crate::verify_and_validate` with
+handler is a concrete function. The *content* is not - `definitions`, `answer` and `run_sql` are
+this crate's own operations, and `LocalService::start` is `crate::verify_and_validate` with
 the catalog port consumed. Nothing in this file names a framework type, which is checkable
 rather than asserted: `cargo xtask check-boundaries` fails on a framework anywhere in a tree it
 governs, and this file added no dependency to this crate's manifest. A shape the application can
@@ -546,9 +625,42 @@ means rather than a field added to one.
 #### Variants
 
 - `Compile` - The pinned bundle would not compile this question, or the splitter built a two-source plan this workspace could not then assemble.
+
+  **The message names neither, and that is deliberate since `telekom/sutura#338`.** The three
+  sentences on this variant's path - this `Display`, the HTTP sink's log line and the MCP tool
+  result a model reads - each blamed the bundle, which was true of the only cause this could
+  carry and stopped being true when `sutura_semantic::CompileFailure` gained its second arm: an
+  assembly failure is a defect in this workspace's own wiring, not a bundle that fails to hold
+  what it names. The cause is kept as a `#[source]` and says which, so the sentence does not
+  have to guess. **No sentence on this variant's path blames the pinned bundle**, and that is
+  registered in `xtask`'s `ABSENCES` table rather than left to review - all three wordings are
+  scanned for across every crate's library source.
+
+  **The limit, next to the claim:** nothing drives this variant through either transport. No
+  test builds a bundle that will not compile, or a plan that will not assemble, and asks for it
+  over HTTP or MCP - so the `500` an assembly failure now gets and the sentence a caller reads
+  with it are held by the code and by no cell. What IS measured is one layer in:
+  `crates/sutura-app/tests/differential/federated.rs` sees an assembly failure as a failure
+  rather than as a refusal.
 - `Warehouse`
 - `Broker` - The credential broker did not answer, so nothing could be executed as the asking subject.
+
+  **Its own variant because the two outages are retried differently**, which `docs/adr/0014`
+  states as a requirement rather than a preference: an authorization server that is down comes
+  back, and a caller told the same sentence for both will retry a data-system outage the same
+  way and learn nothing. A transport chooses a different code for it.
 - `Miswired` - Credentials came back that do not fit the request: a wiring defect on this side.
+
+  Not a refusal - the question was fine - and not `Self::Broker` either, because a broker that
+  answered and a broker that could not be reached are different things to whoever is paged. A
+  caller can do nothing about it, so what it becomes on the wire is an internal failure.
+
+  **What it covers grew, and the variant did not**, deliberately: the grant naming another
+  subject, covering another source set, carrying a deadline that had passed, or a refusal naming
+  a source nobody asked about are one thing to a transport - this deployment is wrong about its
+  own identity wiring - and four things to whoever reads the log line, which is where the typed
+  cause is. Splitting them here would ask each transport to pick a status code for a distinction
+  that changes nothing a caller can do.
 
 #### Implements
 
@@ -567,6 +679,10 @@ Why a service could not be started.
 - `Catalog` - A catalog adapter could not produce a bundle.
 - `Composition` - The catalog contributions do not compose: two sources define one element, certify different versions, or one of them supplies a kind its declaration does not.
 - `NotValidated` - The bundle loaded and an anchor did not reproduce the number its author certified, or could not be run at all.
+
+  **This is the readiness gate, and it is a startup failure rather than a degraded mode.** A
+  bundle whose anchors do not hold is a set of definitions that no longer computes the numbers
+  somebody signed off on; serving it would answer questions with figures nobody certified.
 
 #### Implements
 
@@ -600,6 +716,12 @@ heterogeneous set is an architecture decision rather than a change here.
 answer mints once, for every source its plan reads, and `sutura_domain::warehouse::Warehouse`
 has no signature that runs without the result - so a service with no broker is not a service
 that answers as the process, it is a service that does not compile.
+**It also holds the spend ledger, unbounded unless a composition root opts in.** `Self::start`
+and `Self::start_composed` build one with `SpendLedger::no_budget` - today's behaviour, before
+this counter existed - and `Self::with_spend_ledger` is how a root that read a configured
+ceiling out of its settings replaces it. Not a constructor argument, unlike every other field
+here: those are what a service cannot exist without, and an unbounded ledger is a real, working
+default rather than an omission this type should refuse to start without.
 
 #### Methods
 
@@ -629,6 +751,18 @@ validates is the bundle this serves" true for N sources rather than for one.
 
 `C::Error: Send + Sync` for the same reason `W::Error` is - the cause is kept, owned, and a
 startup failure is reported from wherever the composition root happens to be.
+
+```rust
+pub fn with_spend_ledger(self, spend_ledger: SpendLedger) -> Self
+```
+
+Replaces the spend ledger, for a composition root that read a configured per-replica
+ceiling out of its settings.
+
+A setter rather than a constructor argument, so every existing caller of `Self::start` and
+`Self::start_composed` - most of which configure no ceiling at all - keeps its original
+argument list. `docs/adr/0030` is the record; `governance.per_replica_spend_ceiling` absent
+is the state every one of those callers is already in.
 
 #### Implements
 
@@ -758,21 +892,27 @@ pub enum Tool
 
 One operation a transport exposes.
 
-Two variants, because `Surface` has two methods and this enum is the
-prompt's name for each. It is a list rather than a constant because the point is that a caller
-passes the subset it actually mounts: `Tool::ALL` is what a transport serving the whole surface
-passes, and a deployment that mounts only one passes only that one.
+Three variants: the certified surface's own two operations, and `docs/adr/0013`'s raw tool -
+`Surface::run_sql`. The raw tool is not in `Tool::ALL`:
+unlike `Catalog` and `Query`, no transport mounts it unconditionally, so a composition root adds
+`Tool::RunSql` to the list it passes only when `tools.run_sql.enabled` is true for the deployment
+it is rendering for. It is a list rather than a constant because the point is that a caller
+passes the subset it actually mounts: `Tool::ALL` is what a transport serving the whole certified
+surface passes, and a deployment that mounts only one passes only that one.
 
-**Two entries make this cheap insurance rather than a large win, and it is worth saying so.** The
-property it buys is narrow: the rendered workflow cannot instruct an agent to call an operation
-that is not there. With two operations that is one branch. It is here because the branch costs a
-match arm and the alternative - a hand-written workflow that is right until the day a deployment
-stops mounting the listing - costs a debugging session.
+**Two certified entries make this cheap insurance rather than a large win, and it is worth saying
+so.** The property it buys is narrow: the rendered workflow cannot instruct an agent to call an
+operation that is not there. With two operations that is one branch. It is here because the
+branch costs a match arm and the alternative - a hand-written workflow that is right until the
+day a deployment stops mounting the listing - costs a debugging session. `RunSql` reuses the same
+mechanism for the opposite direction: an agent is told about the raw tool only where it can
+actually be called.
 
 #### Variants
 
 - `Catalog` - Reading what this deployment defines. `GET /v1/catalog`, `sutura catalog`, and whatever an MCP transport would call it. `Surface::definitions`.
 - `Query` - Asking one certified question. `Surface::answer`.
+- `RunSql` - Running one literal, ungoverned SQL statement - `docs/adr/0013`'s tool, off by default. `Surface::run_sql`. Present here only when a deployment turned it on; see this type's own documentation for why it is not in `Tool::ALL`.
 
 #### Methods
 
@@ -791,6 +931,14 @@ pub const fn summary(self) -> &'static str
 ```
 
 What it does, in one line, for the operations list.
+
+`RunSql`'s wording is `docs/adr/0022`'s framing for this tool, restated for an agent rather
+than an operator: ungoverned, runs under the deployment's own role rather than the asking
+subject's, and its result carries none of the provenance a `query` answer carries. It never
+calls the raw tool's own result "certified" in any form, including a negated one - the word
+belongs to the certified path alone, and
+`tests::run_sql::the_run_sql_summary_names_the_ungoverned_boundary_and_never_calls_it_certified`
+holds the sentence to that.
 
 #### Implements
 
@@ -1172,6 +1320,7 @@ reviewed, so the refusal is what carries the names.
 #### Variants
 
 - `Empty` - Nothing was contributed; a deployment serves at least one metadata source.
+- `Manifest` - The composed contributions are not a manifest: nothing to record, or two of them naming one source. Distinct from `CompositionError::Empty`, which is this function's own check on its input - this one is the manifest refusing to record a composition it cannot represent. Only `NoContributors` is unreachable from here: `CompositionError::Empty` above wins first on any input that would otherwise produce it. `DuplicateSource` IS reachable through this public function - `assemble` runs no source-name uniqueness check of its own, only the per-element checks below - and is exercised directly by a test on this function, not only on `ContributionManifest::parse`. What keeps a duplicated name off the *served* path is `Catalogs::parse` in `sutura-config` refusing it at configuration time, before assembly runs.
 - `NotASingleContribution` - A contribution's own manifest did not name exactly one source, so this bundle cannot say who contributed it. The `count` is what a reader needs: the manifest is supposed to be the per-source record, and a value that failed to be one has nothing to merge under.
 - `VersionMismatch` - Two contributors certify different snapshots. A bundle is one version, and `docs/adr/0011`'s amendment records the decision: two sources certified at different times is the "answers that differ across a refresh boundary" shape, refused rather than papered over.
 - `MetricCollision` - The one interpretation has no precedence, declared or otherwise: two definitions of one number is the failure this system exists to prevent.
@@ -1185,10 +1334,47 @@ reviewed, so the refusal is what carries the names.
 
 `Debug`, `Display`, `Error`
 
+### `enum ElementKind`
+
+```rust
+pub enum ElementKind
+```
+
+The six kinds of catalog element two sources may collide over.
+
+`CompositionError::ElementCollision`'s `kind` field used to be a `&'static str`: a free-text
+field on a variant a caller matches by name is a contradiction, because nothing stopped a sixth
+call site from spelling one of the five existing kinds differently, or a seventh call site from
+naming a kind `check_no_element_collisions` does not actually check. Neither `DefinitionKind`
+nor `Capability` in `sutura_domain` fits: the first does not distinguish a model from a
+relationship (both are `Structure`), and the second has no variant for either. A small closed
+enum local to this composition step is what the issue's "existing typed vocabulary or a small
+closed enum if needed" resolves to here.
+
+**The limit, next to the claim.** Closure - a seventh call site naming a kind this type has no
+variant for is a compile error - is held by the compiler, for all six variants. WHICH kind a
+given call site in `check_no_element_collisions` names is pinned by a test for two of them,
+`Model` and `Relationship`; the other four (`GlossaryTerm`, `Caveat`, `Absence`, `WorkedExample`)
+have no cell of their own, so a call site there naming the wrong (but still valid) variant is
+caught by nothing but review.
+
+#### Variants
+
+- `Model`
+- `Relationship`
+- `GlossaryTerm`
+- `Caveat`
+- `Absence`
+- `WorkedExample`
+
+#### Implements
+
+`Clone`, `Copy`, `Debug`, `Display`, `Eq`, `PartialEq`
+
 ### `fn assemble`
 
 ```rust
-pub fn assemble(bundles: Vec<sutura_domain::pinned::PinnedDefinitions>) -> Result<sutura_domain::pinned::PinnedDefinitions, CompositionError>
+pub fn assemble(bundles: &[sutura_domain::pinned::PinnedDefinitions]) -> Result<sutura_domain::pinned::PinnedDefinitions, CompositionError>
 ```
 
 Composes N contributions into one bundle, refusing a composition ADR 0011 says cannot exist.
@@ -1206,16 +1392,20 @@ one source, two contributions certifying different versions, two sources providi
 element, a contributor whose content disagrees with its declaration, or definitions/knowledge
 that do not assemble once merged.
 
+Takes a slice, not an owned `Vec`: every `Contributor` below borrows its bundle's
+`Definitions`/`Knowledge` rather than cloning them, so this function never needs to own a bundle
+to begin with - a caller that already has a `Vec` passes `&bundles`.
+
 ## Module `capability`
 
 What this surface can be asked to do, named once for every transport that offers it.
 
 # Why the vocabulary is here rather than in a transport
 
-`crate::surface::Surface` has exactly two operations - read the pinned bundle, and answer one
-governed question - and those two *are* the tool set. A transport renames them for its own
-protocol: the agent surface calls them tools and the HTTP surface calls them routes. Neither owns
-the set.
+`crate::surface::Surface` has three operations - read the pinned bundle, answer one governed
+question, and (`docs/adr/0013`, off by default) run one raw statement - and those three *are* the
+tool set. A transport renames them for its own protocol: the agent surface calls them tools and
+the HTTP surface calls them routes. Neither owns the set.
 
 That is not a preference. `sutura-mcp` and `sutura-http` cannot see each other - *an adapter never
 calls another adapter* - so a set owned by one of them is a set the other has to reach through it,
@@ -1279,7 +1469,19 @@ deterministic.
 #### Variants
 
 - `DescribeCatalog` - Read the pinned bundle: which metrics exist, at which grains, with which dimensions and which filter values.
+
+  `crate::surface::Surface::definitions`. Descriptive content only - the catalog port takes no
+  request context and cannot be given one - but a listing of what a deployment measures is
+  business information even with no row of data in it, which is why it is a capability at all
+  rather than something public.
 - `AskMetric` - Answer one governed question about one certified metric.
+
+  `crate::surface::Surface::answer`.
+- `RunSql` - Run one literal SQL statement against the configured source, off by default and refused where the deployment cannot execute it as the asking subject or is not declared single-user.
+
+  `crate::surface::Surface::run_sql`. `docs/adr/0013` is the record: its result carries no
+  `sutura_domain::pinned::Provenance` and no field a definition digest could occupy, so a raw
+  answer cannot be rendered as a certified one.
 
 #### Methods
 
@@ -1415,6 +1617,21 @@ Whether this caller may use one capability.
 what it may do, and a transport calls it on every invocation whether or not it filtered the
 advertisement.
 
+```rust
+pub fn without(self, capability: Capability) -> Self
+```
+
+Removes one capability, whatever granted it.
+
+**A deployment-level narrowing, and deliberately independent of a caller's own scopes.** A
+tool that is off for this DEPLOYMENT - `docs/adr/0013`'s off-by-default raw SQL tool is the
+first one - has to be absent for every caller including one presenting every scope this
+surface knows, and including the no-authentication single-player case
+`Self::every_capability` answers. Applying this after either constructor is what makes "a
+tool this deployment never turned on" and "a tool this caller was not granted" two different
+reasons a caller sees the same absence for, without `Permitted` itself growing a second
+notion of what a scope is.
+
 #### Implements
 
 `Clone`, `Debug`, `Eq`, `PartialEq`
@@ -1424,8 +1641,8 @@ advertisement.
 Asking every open data system whether it holds the tables the bundle names.
 
 **The decision sequence, once, for every composition root that has one** - and it is here rather
-than copied into each because review measured the copy: the two helpers underneath were
-byte-identical between `sutura-serve` and `sutura-cli`, and neither of them contains a word an
+than copied into each because review measured the copy: each helper underneath was
+byte-identical between `sutura-serve` and `sutura-cli`, and none of them contains a word an
 operator reads. `models_by_table` is a pure query over `PinnedDefinitions`, which is a
 `sutura-domain` type, and `AbsentBehind`'s rendering is a list of names rather than a sentence.
 
@@ -1475,11 +1692,39 @@ root that composed the adapter is the one that can flatten it.
 
 - `Present` - Asked, and every table is there. Carries how many, for a line that says so.
 - `NotReported` - The adapter did not report - `TablesPresent::NotAsked`, the port's default.
+
+  **Not readable as verified**, which is the property the port's own answer type exists to
+  keep: a root that printed nothing here would make the one outcome meaning *nothing checked
+  this* indistinguishable from a data system that really looked.
 - `Absent` - Asked, and these tables are not there. A refusal, and the models to name in it.
 - `UnreadableInventory` - An unreadable inventory established neither presence nor absence for these tables. A refusal without a count or model names: no catalog declaration was shown wrong.
 - `Unaccounted` - Asked, answered, and the answer did not account for every table the data system said it holds - so these tables are neither established present nor established absent.
+
+  **It names tables and not the models behind them, which is the one place this verdict
+  deliberately says less than `Self::Absent`.** A model is what an operator opens to fix a
+  `table:` that is wrong, and nothing here says a `table:` is wrong: the catalog may be
+  entirely right and the data system's own answer incomplete. Naming models would send an
+  operator to exactly the file `telekom/sutura#275` is about them being sent to wrongly.
 - `Refused` - The data system refused to be asked: this identity may not list it.
 - `Unverified` - The data system could not be asked, for a reason that is not a refusal.
+
+#### Methods
+
+```rust
+pub fn boot_policy(self) -> BootPolicy<E>
+```
+
+Splits this verdict the one way both composition roots split it.
+
+Exhaustive over `Verdict`, so a variant added to the port's answer is a compile error
+here - at the one place that has to decide which side of the boot policy it falls on -
+rather than a silently-served outcome in whichever root forgot it.
+
+# Errors
+
+The four outcomes this deployment does not start on: a refused listing, a table the data
+system does not hold, an unreadable inventory, and an inventory that did not account for
+itself.
 
 #### Implements
 
@@ -1528,6 +1773,69 @@ The absent tables and the models behind each, for a root that renders its own sh
 
 `Clone`, `Debug`, `Display`, `Eq`, `PartialEq`
 
+### `enum Refusal`
+
+```rust
+pub enum Refusal<E>
+```
+
+The boot policy over one `Verdict`: this deployment refuses, or it carries on and says so.
+
+**The partition is the thing that was held by recall in two composition roots.** Each root
+matched all seven verdicts and decided per arm which ones return an error, and the two agreed
+only because someone kept them agreeing - so a source whose outcome one root refused and the
+other served was a two-file edit away. Stating it once makes the two roots' boot behaviour the
+same fact rather than the same intention.
+
+**`Err` for a refusal here, and that is not the query path's rule inverted.** A governance
+refusal lives inside the `Ok` where a CALLER could mistake it for a hiccup and retry; this is
+boot, the outcome is that the process does not start, and both roots already answered `Err` for
+exactly these four outcomes, carrying a rendered sentence. What changed is that the four are now
+a type rather than prose a caller would have had to parse.
+
+**The limit, stated with the claim.** This is a type saying which outcomes refuse. It does not
+confine a root to asking: `Verdict` is still public, because *what the data system answered*
+and *what this deployment does about it* are two questions, and the port's own answer is what an
+adapter's suite asserts on. A future root that matches `Verdict` directly and re-decides the
+split is what review has to catch; no type here stops it.
+
+Which outcome belongs on which side is `Verdict`'s own documentation, and changing it is
+`telekom/sutura#141`'s decision rather than a call site's.
+
+#### Variants
+
+- `Refused` - The data system refused to be listed: this identity may not ask.
+- `Absent` - Asked, answered, and these tables are not there - with the models that named them.
+- `UnreadableInventory` - An unreadable inventory established neither presence nor absence for these tables.
+- `Unaccounted` - The answer did not account for every table the data system said it holds.
+
+#### Implements
+
+`Debug`
+
+### `enum Notice`
+
+```rust
+pub enum Notice<E>
+```
+
+The boot policy's other side: this deployment serves, and a root says what was established.
+
+**Every one of these is a line a root emits, including the two clean ones.** `NotReported` is
+the outcome meaning *nothing verified this*, so a root that printed nothing for it would make it
+indistinguishable from a data system that really looked - which is why silence is not one of the
+shapes here.
+
+#### Variants
+
+- `Present` - Asked, and every table is there. Carries how many, for a line that says so.
+- `NotReported` - The adapter did not report - `TablesPresent::NotAsked`, the port's default.
+- `Unverified` - The data system could not be asked, for a reason that is not a refusal.
+
+#### Implements
+
+`Debug`
+
 ### `struct Asked`
 
 ```rust
@@ -1564,6 +1872,46 @@ What it answered.
 
 `Debug`
 
+### `struct TablesChanged`
+
+```rust
+pub struct TablesChanged
+```
+
+The bundle being served names tables that are not the ones attached behind it.
+
+**A type rather than the `String` both roots built**, and the two sets rather than a rendered
+sentence: a caller that wants to act on which tables moved can read them, and the sentence is
+`Display` for the roots that only want to print it. Both roots printed the SAME
+sentence - measured byte-identical - so it is not wording that belongs to a transport, and it
+moved with the comparison instead of being copied a third time.
+
+Non-empty by construction: `refuse_unattached` is the only constructor and returns `Ok` when
+both sets are empty, so a mismatch that names nothing is unrepresentable rather than checked.
+
+**The limit, stated with the claim.** What this compares is TABLE NAMES between two loads of one
+catalog directory. It does not establish that a table which is attached holds the columns a
+model names, and it says nothing about a data system a root never attached anything for - the
+pre-flight above is that half, for the sources that can answer it.
+
+#### Methods
+
+```rust
+pub const fn extra(&self) -> &BTreeSet<TableName>
+```
+
+Tables attached for a model the bundle being served no longer names.
+
+```rust
+pub const fn missing(&self) -> &BTreeSet<TableName>
+```
+
+Tables the bundle being served names with no table attached behind them.
+
+#### Implements
+
+`Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
+
 ### `fn ask`
 
 ```rust
@@ -1587,3 +1935,235 @@ printed would not be assertable.
 
 The order is the registry's, which is the source name's - so two roots asking the same question
 report it in the same order, and a test can name the answer it expects rather than search for it.
+
+### `fn served_tables`
+
+```rust
+pub fn served_tables(served: &sutura_domain::pinned::PinnedDefinitions) -> std::collections::BTreeSet<sutura_domain::model::TableName>
+```
+
+Every table the bundle's models sit behind, whichever data system holds it.
+
+A pure query over a `sutura-domain` type, here rather than in each composition root for
+`models_by_table`'s reason: it names nothing an operator reads. Both roots compared the result
+against what their engine attached, from a body that was byte-identical in the two of them.
+
+### `fn refuse_unattached`
+
+```rust
+pub fn refuse_unattached(serving: &std::collections::BTreeSet<sutura_domain::model::TableName>, attached: &std::collections::BTreeSet<sutura_domain::model::TableName>) -> Result<(), TablesChanged>
+```
+
+The tables the bundle being served names, against the tables the engine actually holds.
+
+**One home for a comparison both composition roots made from byte-identical bodies.** The two
+sets come from two `load()` calls on the same catalog directory; a model added between them is
+refused here rather than served with no table behind it, which would fail the first question
+against it at query time.
+
+Two sets rather than a bundle and an engine, so the comparison is unit-testable without a digest,
+a knowledge declaration or a data system - `served_tables` is the other half and is one map
+over a public accessor.
+
+Both directions are refused, and the second is not pedantry: a table attached for a model the
+served bundle no longer names means the catalog directory changed between two loads seconds
+apart, and whatever else moved with it is the part nobody has looked at.
+
+# Errors
+
+Either set holding a table the other does not, as a `TablesChanged` carrying both differences.
+
+### `type_alias BootPolicy`
+
+The two sides of the boot policy: a notice this deployment serves with, or a refusal it stops on.
+
+A named alias because `clippy::type_complexity` refuses the bare `Result` at this arity, and the
+name is the better half of that trade rather than a suppression: the split IS the decision, so a
+signature that says *boot policy* reads as the thing being returned and not as two halves a
+caller has to recombine. It stays a `Result` so `?` in a composition root keeps working.
+
+## Module `spend`
+
+The per-replica spend counter: in-process, windowed, keyed by the asking subject.
+
+`docs/adr/0030-where-a-budget-lives.md` decides every shape here; this module is the mechanism.
+Three decisions worth restating because a reader of the code alone could miss them:
+
+**Fixed windows, not sliding ones.** A subject's spend resets to zero the first time this
+ledger is consulted after the window has elapsed, rather than decaying continuously. Simpler to
+reason about - "how much has this subject spent since their window started" needs one `Instant`
+and one running total, not a queue of timestamped charges to prune - and the cost a sliding
+window would avoid (a subject who spends right at a boundary can spend up to twice the ceiling
+across the seam) is not a cost `docs/adr/0030` asked this record to close: the record's own
+scope is a per-replica counter that resets on restart in addition to its own window, so a seam
+effect inside one window is not the precision this shape is buying.
+
+**Keyed on `Subject`, never the whole `PrincipalChain`.**
+An agent acting for a subject spends that subject's own budget - see the ADR for the argument and
+its cost.
+
+**`None` configured is unlimited, not zero.** `SpendLedger::no_budget` is what every deployment
+ran before this existed, and it is a real state a caller may still choose rather than a value
+nothing constructs.
+
+### `struct SpendBudget`
+
+```rust
+pub struct SpendBudget
+```
+
+A byte ceiling and the window it resets on, already validated.
+
+A plain pair rather than a re-export of `sutura_config::SpendBudget`: this crate depends on
+nothing outside `sutura-domain`, `sutura-semantic` and `thiserror` - see this crate's own module
+documentation - and a composition root reads the validated ceiling and window out of its
+settings and hands the two primitives here, the same shape `working_set_bytes: u64` already
+uses for `RuntimeSettings::working_set`.
+
+#### Methods
+
+```rust
+pub const fn new(ceiling_bytes: u64, window: Duration) -> Self
+```
+
+**A raw constructor, not a parse - the zero fence lives one crate over.** This type takes
+whatever `ceiling_bytes` and `window` it is given, `Duration::ZERO` included: under a zero
+window every charge resets immediately, and a priced question over the ceiling mints
+`reset_after == Duration::ZERO` again. The only production caller is
+`sutura_config::SpendBudget::parse` (`crates/sutura-config/src/governance.rs`), which
+refuses a zero window (and a zero ceiling) before this constructor ever sees one - this
+type's own doc comment above states why this crate cannot depend on that one, so the fence
+sits there rather than here.
+
+#### Implements
+
+`Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`
+
+### `struct SpendLedger`
+
+```rust
+pub struct SpendLedger
+```
+
+The counter: one instance per process, consulted by every question this replica answers.
+
+**`&self`, not `&mut self`** - one ledger is shared by every request without a lock in this
+type's own signature, the same shape `sutura_domain::audit::AuditSink::record` uses for the same
+reason. The mutable state is inside a `Mutex` guarding the per-subject map.
+
+#### Methods
+
+```rust
+pub fn new(budget: Option<SpendBudget>) -> Self
+```
+
+A ledger bounded by `budget`, or unbounded if `None`.
+
+```rust
+pub fn no_budget() -> Self
+```
+
+No ceiling configured. Every question is admitted and nothing is counted - `docs/adr/0030`'s
+"absent means no budget, which is today's behaviour" read back as a constructor.
+
+## Module `raw`
+
+`docs/adr/0013`'s raw SQL tool: the port-facing execution path, split out of `lib.rs` because
+that file hit the thousand-line limit `cargo xtask max-lines` enforces.
+
+One function beside the types it needs: `run_sql` mirrors `crate::answer`'s credential
+handling exactly and differs only on the way out, where every execution failure becomes a
+refusal rather than a `RunSqlError` - see that function's own documentation for why.
+
+### `enum RunSqlError`
+
+```rust
+pub enum RunSqlError<M>
+```
+
+Why running a raw statement did not produce an outcome.
+
+**Deliberately not `ServiceError`.** That type's `Compile` and
+`Federated` arms describe the compiler and the splitter, neither of which this path touches - a
+raw statement is unparsed text, end to end. What is left is the credential half
+`answer` also has, plus one arm of its own for a state the boot refusal is
+supposed to make unreachable: the raw tool turned on over an adapter that does not accept raw
+text at all.
+
+#### Variants
+
+- `Broker` - The credential broker did not answer.
+- `Credentials` - The broker's grant does not fit this request.
+- `Posture` - The presented leg disagrees with how this source was declared.
+- `NoAcceptingSource` - No data system is registered under the raw tool's configured source, or the one registered does not declare `Warehouse::ACCEPTS_RAW_STATEMENTS`.
+
+  **A wiring defect, not a caller-facing refusal.** `sutura_config`'s boot refusal is what is
+  supposed to make this unreachable in a running deployment - the raw tool is refused at
+  startup over an adapter that cannot honour it - so reaching this arm at all means the
+  composition root and the boot check disagreed about what this build links.
+
+#### Implements
+
+`Debug`, `Display`, `Error`
+
+### `struct AnsweredRaw`
+
+```rust
+pub struct AnsweredRaw
+```
+
+One raw call's result: what the caller is told, and what it ran under - the
+`Answered` of the raw path, over `sutura_domain::raw::RawOutcome` rather
+than `ToolOutcome`.
+
+#### Methods
+
+```rust
+pub const fn executed_until(&self) -> Option<Expiry>
+```
+
+```rust
+pub fn into_outcome(self) -> sutura_domain::raw::RawOutcome
+```
+
+```rust
+pub const fn outcome(&self) -> &sutura_domain::raw::RawOutcome
+```
+
+#### Implements
+
+`Debug`
+
+### `fn run_sql`
+
+```rust
+pub fn run_sql<W, B>(context: &sutura_domain::identity::RequestContext, statement: &sutura_domain::raw::RawStatement, broker: &B, warehouses: &crate::warehouses::Warehouses<W>) -> RunningRaw<B>
+```
+
+Runs one literal statement against the deployment's configured source, or says why it will not.
+
+# PR1's scope, stated as a limit rather than left implicit
+
+**This targets the sole registered data system, and refuses `RunSqlError::NoAcceptingSource`
+where more than one is open or none is.** `docs/adr/0013`'s showcase is one Postgres source; a
+deployment naming which of several sources the raw tool may run over is future work, not a
+decision this function makes by omission - a second source is refused rather than guessed at.
+
+# Otherwise, this mirrors `answer`'s credential handling exactly
+
+Mint once, check the grant agrees with the request, check the presented leg agrees with the
+adapter's declared posture - the same three findings behind the same one guard, for the same
+reason: a broker is an adapter outside the hexagon, and its answer is input.
+
+# What is different from `answer` on the way out, and why
+
+**Every failure to execute becomes a refusal, never a `RunSqlError`.** The statement is the
+caller's own text, so a syntax error, a statement timeout, or the server refusing a write inside
+the read-only transaction `docs/adr/0013`'s amendment wraps every call in are all answers *about
+that statement* - not an infrastructure outage this deployment must page for. What remains an
+`Err` is only what happens before the statement ever reaches the data system: the broker not
+answering, or credentials that do not fit.
+
+### `type_alias RunningRaw`
+
+What running a raw statement produced, or why it could not.

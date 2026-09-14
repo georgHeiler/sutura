@@ -7,22 +7,33 @@
 //!
 //! ## Limits
 //!
-//! - `NoTls`, unconditional: a `hostssl`-only server refuses this connection.
-//! - A `statement_timeout` is set at connect, so a slow server statement cannot hold a
-//!   blocking-pool thread past the caller's request deadline.
+//! - **No transport of its own.** [`PostgresWarehouse::connect`] opens with no TLS at all; the
+//!   verifying path is [`PostgresWarehouse::connect_secured`], which takes the
+//!   `rustls::ClientConfig` a composition root built from the declared channel
+//!   ([`tls::client_config`]). Which source gets which is `sutura_config::sources::transport`'s
+//!   decision and never this adapter's, so a caller that builds no config gets a cleartext
+//!   connection - including to a server that offers TLS.
+//! - **`dry_run` and `execute` stop at the port's deadline**, with `SET LOCAL statement_timeout` -
+//!   `docs/adr/0029`'s Postgres row. The wait for `execution_lock` is itself outside the deadline;
+//!   a caller already spent once the lock is held is refused locally as `DeadlineSpent`. `57014
+//!   query_canceled` is also what a manual `pg_cancel_backend` produces - indistinguishable to
+//!   `deadline_exceeded`. The raw SQL tool's own path (`execute_raw`) carries no per-request
+//!   deadline; it is stopped by the connect-time `SET statement_timeout` that already existed, and
+//!   this record adds only classifying that stop.
 
+pub mod connection;
 /// The fixture tier's credential - a value that cannot exist unconfigured.
 ///
 /// **Behind the default-off `fixtures` feature**, because both callers are tests
 /// (`crates/sutura-exec-postgres/tests/conformance.rs` and
-/// `crates/sutura-app/tests/adapters/mod.rs`) and `nix/shipped.nix` builds cargo's DEFAULT set: so
+/// `crates/sutura-app/tests/adapters/adapters.rs`) and `nix/shipped.nix` builds cargo's DEFAULT set: so
 /// no artefact a release publishes contains this module or the connection config over it, which
 /// deletes the *reachable from a consumer* half rather than hardening it. `--all-features` compiles,
 /// lints and tests it on every run.
 #[cfg(feature = "fixtures")]
 pub mod fixture;
 mod importer;
-
+pub mod tls;
 use std::path::Path;
 
 use bytes::Bytes;
@@ -32,6 +43,7 @@ use sutura_domain::identity::{Presented, PresentedDisagreesWithPosture};
 use sutura_domain::model::TableName;
 use sutura_domain::plan::Executable;
 use sutura_domain::warehouse::cardinality::{CountsNotRead, DeclaredKey, KeyUniqueness};
+use sutura_domain::warehouse::deadline::Deadline;
 use sutura_domain::warehouse::{AnchorRows, MalformedRowSet, ParamValue, PreFlight, Real, RowSet, Value, Warehouse};
 use sutura_sql::generate::{generate, generate_key_probe};
 use sutura_sql::{Dialect, GenerateError, GeneratedQuery};
@@ -146,6 +158,25 @@ pub enum PostgresError {
         #[source]
         cause: core::num::ParseIntError,
     },
+    /// The raw SQL tool's own `BEGIN READ ONLY` or `ROLLBACK` did not run - sutura's own fixed
+    /// text on the simple query protocol (`docs/adr/0013`), never the caller's.
+    #[error("the raw SQL tool's read-only transaction could not be opened")]
+    RawTransaction {
+        #[source]
+        cause: tokio_postgres::Error,
+    },
+    /// The certified path's own per-statement transaction (`docs/adr/0029`) did not open - sutura's
+    /// own fixed literal text, never the caller's, the same as [`Self::RawTransaction`].
+    #[error("the per-statement deadline transaction could not be opened")]
+    Transaction {
+        #[source]
+        cause: tokio_postgres::Error,
+    },
+    /// The deadline was already spent once [`PostgresWarehouse::execution_lock`] was acquired -
+    /// refused locally, no round trip: that unbounded wait is outside `sutura_app`'s own pre-call
+    /// check.
+    #[error("the deadline was already spent by the time the connection's lock was acquired")]
+    DeadlineSpent,
     /// The credential broker handed this adapter subject material it has nowhere to put.
     #[error(
         "source `{at}` was handed {presented}, and this adapter has nowhere for a subject's own \
@@ -158,9 +189,54 @@ pub enum PostgresError {
         #[source]
         cause: PresentedDisagreesWithPosture,
     },
-    /// One leg of a federated answer, which nothing here can assemble above.
+    /// A leg without a combiner.
     #[error("this adapter answers a whole plan, and the leg against {table} needs a combiner above it")]
     LegWithoutCombiner { table: String },
+    /// The declared trust anchors could not be read or parsed.
+    #[error("the declared trust anchors could not be read as a PEM bundle at {path}")]
+    AnchorsRead {
+        path: String,
+        #[source]
+        cause: std::io::Error,
+    },
+    /// The declared trust anchors parsed to no certificates.
+    #[error("the trust-anchor bundle at {path} parsed to no certificates - a store of nothing verifies nothing")]
+    AnchorsEmpty { path: String },
+    /// The declared client identity could not be read.
+    #[error("the declared client identity could not be read at {path}")]
+    IdentityRead {
+        path: String,
+        #[source]
+        cause: std::io::Error,
+    },
+    /// The declared client certificate parsed to no certificate, or the key to no key.
+    #[error("the client identity pair is incomplete: expected a certificate and a key, and found {what} at {path}")]
+    IdentityIncomplete { path: String, what: &'static str },
+    /// The client key was not an RSA/EC key this build can present.
+    #[error("the client private key at {path} is not a private key this build can present")]
+    IdentityKey { path: String, what: &'static str },
+    /// The explicitly selected host trust store could not be read completely.
+    #[error("the host trust store reported {errors} errors while it was read")]
+    SystemStoreRead {
+        errors: usize,
+        #[source]
+        cause: rustls_native_certs::Error,
+    },
+    /// The explicitly selected host trust store held no roots.
+    #[error("the host trust store held no certificates - a store of nothing verifies nothing")]
+    SystemStoreEmpty,
+    /// A certificate returned by the host trust-store reader was not a usable root.
+    #[error("the host trust store returned a certificate this TLS implementation cannot use as a root")]
+    SystemStoreCertificate {
+        #[source]
+        cause: rustls::Error,
+    },
+    /// The cryptographic provider could not construct a client verifier.
+    #[error("the TLS client verifier could not be constructed")]
+    TlsConfiguration {
+        #[source]
+        cause: rustls::Error,
+    },
 }
 
 /// A `PostgreSQL` connection, behind the [`Warehouse`] port.
@@ -169,6 +245,22 @@ pub struct PostgresWarehouse {
     posture: sutura_domain::source::SourcePosture,
     runtime: tokio::runtime::Runtime,
     client: tokio_postgres::Client,
+    /// Single-flights every exchange on [`Self::client`] - a `PREPARE`, a certified `run`, a raw
+    /// call's `BEGIN`/statement/`ROLLBACK` triple. `Client` PIPELINES rather than serializing
+    /// concurrent callers: measured, two threads in `execute_raw` interleaved their triples, so a
+    /// refused write persisted OUTSIDE any transaction and a concurrent `run` failed with `25P02`.
+    /// `tokio::sync::Mutex<()>` (`clippy.toml` disallows `std::sync::Mutex`), held across the whole
+    /// `block_on` - two certified `run`s wait too, the shared-connection cost `docs/adr/0013` states.
+    execution_lock: tokio::sync::Mutex<()>,
+    /// The `SET statement_timeout` sent once at connect, kept so a per-statement `SET LOCAL` can be
+    /// clamped to it - `docs/adr/0029`'s outer bound. Zero (disabled) reads as no ceiling at all.
+    statement_timeout_ceiling_ms: u32,
+}
+
+/// Locks [`PostgresWarehouse::execution_lock`]. `blocking_lock` panics off a blocking-pool thread
+/// (like `Runtime::block_on`), which is how both transports call it (`spawn_carrying_span`).
+fn lock_execution(lock: &tokio::sync::Mutex<()>) -> tokio::sync::MutexGuard<'_, ()> {
+    lock.blocking_lock()
 }
 
 impl core::fmt::Debug for PostgresWarehouse {
@@ -180,35 +272,78 @@ impl core::fmt::Debug for PostgresWarehouse {
             .finish_non_exhaustive()
     }
 }
-
 impl PostgresWarehouse {
     /// Opens one connection under the supplied [`tokio_postgres::Config`] and keeps it for this
-    /// adapter's life.
+    /// adapter's life, over no transport security. The fixture tier's path (unix socket, loopback),
+    /// and the composition root's `plaintext` choice - the caller has already refused a
+    /// non-loopback plaintext host.
     pub fn connect(
         source: sutura_domain::model::SourceName,
         posture: sutura_domain::source::SourcePosture,
         config: &tokio_postgres::Config,
     ) -> Result<Self, PostgresError> {
+        Self::connect_secured(source, posture, config, None)
+    }
+
+    /// Opens one connection under the supplied `config`, secured as the caller resolved.
+    ///
+    /// `tls` is `None` for a `plaintext` channel and a ready-built `rustls::ClientConfig` for
+    /// `verified` and `mutual` channels. Both are produced by the composition root, which is the
+    /// only place that can see the declared `sutura_config::sources::transport::SourceTransport` -
+    /// this adapter takes the resolved material rather than a second copy of the three-state shape.
+    pub fn connect_secured(
+        source: sutura_domain::model::SourceName,
+        posture: sutura_domain::source::SourcePosture,
+        config: &tokio_postgres::Config,
+        tls: Option<rustls::ClientConfig>,
+    ) -> Result<Self, PostgresError> {
+        let mut config = config.clone();
+        // `Prefer` is the driver's default and falls back to plaintext when a server refuses SSL.
+        // A supplied verifier means the caller declared TLS, so make the handshake mandatory here,
+        // beside the connection itself, rather than relying on every composition root to remember.
+        if tls.is_some() {
+            config.ssl_mode(tokio_postgres::config::SslMode::Require);
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|cause| PostgresError::Runtime { cause })?;
-        let (client, connection) = runtime
-            .block_on(config.connect(tokio_postgres::NoTls))
-            .map_err(|cause| PostgresError::Connect { cause })?;
-        // The connection's driver task is owned by this runtime, so it is polled exactly while this
-        // adapter is inside a `block_on`. `Client` is `Send + Sync`, so the multi-thread runtime
-        // serializes calls onto its workers. The driver task's ultimate error has no caller to
-        // report to; the next `block_on` fails on its own.
-        #[expect(
-            clippy::let_underscore_must_use,
-            clippy::let_underscore_untyped,
-            reason = "the connection driver task's own error has no caller to route to, and the next \
-                      block_on fails on the connection's state"
-        )]
-        runtime.spawn(async move {
-            let _ = connection.await;
-        });
+        // Each arm CONNECTS and SPAWNS the driver task, so the two arms unify on the `Client` and
+        // the connection's differing stream type does not leak into the match. `runtime.spawn`
+        // accepts both `Connection` shapes because each is `Send` once its stream is.
+        let client = if let Some(client_config) = tls {
+            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
+            let (client, connection) = runtime
+                .block_on(config.connect(connector))
+                .map_err(|cause| PostgresError::Connect { cause })?;
+            // Owned by this runtime, polled independently of any caller's `block_on`. `Client`
+            // PIPELINES - see `execution_lock`. No caller to report the driver's ultimate error to;
+            // the next `block_on` fails on its own.
+            #[expect(
+                clippy::let_underscore_must_use,
+                clippy::let_underscore_untyped,
+                reason = "the connection driver task's own error has no caller to route to, and the next \
+                              block_on fails on the connection's state"
+            )]
+            runtime.spawn(async move {
+                let _ = connection.await;
+            });
+            client
+        } else {
+            let (client, connection) = runtime
+                .block_on(config.connect(tokio_postgres::NoTls))
+                .map_err(|cause| PostgresError::Connect { cause })?;
+            #[expect(
+                clippy::let_underscore_must_use,
+                clippy::let_underscore_untyped,
+                reason = "the connection driver task's own error has no caller to route to, and the next \
+                              block_on fails on the connection's state"
+            )]
+            runtime.spawn(async move {
+                let _ = connection.await;
+            });
+            client
+        };
         // The transport that calls this adapter holds a request timeout, but the server-side work a
         // `block_on` here is polling is NOT cancelled by it - a slow statement would hold this
         // blocking-pool thread past the caller's deadline. `statement_timeout` is the cheap guard:
@@ -224,6 +359,8 @@ impl PostgresWarehouse {
             posture,
             runtime,
             client,
+            execution_lock: tokio::sync::Mutex::new(()),
+            statement_timeout_ceiling_ms: timeout_ms,
         })
     }
 
@@ -452,45 +589,6 @@ impl PostgresWarehouse {
             ),
             _ => Err(unsupported("a type this adapter does not map")),
         }
-    }
-
-    /// Runs a statement and collects its rows.
-    ///
-    /// The column names and types are read from the PREPARED statement, so an answer with no rows
-    /// still carries its projection - the same reason `sutura-exec-duckdb` reads labels from the
-    /// executed statement rather than guessing.
-    fn run(&self, query: &GeneratedQuery) -> Result<RowSet, PostgresError> {
-        let bound = Self::bind(query.params());
-        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = bound.iter().map(PgParam::as_ref).collect();
-        let (columns, rows) = self.runtime.block_on(async {
-            let statement = self
-                .client
-                .prepare(query.sql())
-                .await
-                .map_err(|cause| PostgresError::Prepare { cause })?;
-            let columns: Vec<(String, Type)> = statement
-                .columns()
-                .iter()
-                .map(|column| (column.name().to_owned(), column.type_().clone()))
-                .collect();
-            let rows = self
-                .client
-                .query(&statement, refs.as_slice())
-                .await
-                .map_err(execute_err_mapped)?;
-            Ok::<_, PostgresError>((columns, rows))
-        })?;
-        let labels: Vec<String> = columns.iter().map(|(name, _)| name.to_owned()).collect();
-        let width = labels.len();
-        let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut cells = Vec::with_capacity(width);
-            for (index, (label, column_type)) in columns.iter().enumerate() {
-                cells.push(Self::cell(label, column_type, &row, index)?);
-            }
-            out.push(cells);
-        }
-        RowSet::new(labels, out).map_err(|cause| PostgresError::Shape { cause })
     }
 }
 
@@ -800,6 +898,11 @@ impl Warehouse for PostgresWarehouse {
     const IMPERSONATION: sutura_domain::source::ImpersonationCapability =
         sutura_domain::source::ImpersonationCapability::NoPlaceForASubject;
 
+    /// The one adapter this build links that may accept a raw statement at all -
+    /// `docs/adr/0013`'s showcase source. The statement is handed to `tokio-postgres` unexamined;
+    /// Postgres's own parser and its own `GRANT`/`REVOKE` model are what authorize or refuse it.
+    const ACCEPTS_RAW_STATEMENTS: bool = true;
+
     fn source(&self) -> &sutura_domain::model::SourceName {
         &self.source
     }
@@ -808,21 +911,30 @@ impl Warehouse for PostgresWarehouse {
         &self.posture
     }
 
-    fn dry_run(&self, executable: Executable<'_>, presented: &Presented) -> Result<PreFlight, Self::Error> {
+    /// Prepares the statement without running it, as the identity this leg presents.
+    ///
+    /// `estimated_bytes` is `None`: `EXPLAIN` gives this adapter rows and a planner cost unit, not
+    /// bytes, and no money attaches to either - folding a Postgres cost estimate into a
+    /// byte-denominated budget would need a conversion this adapter does not attempt.
+    /// `docs/adr/0030` names this honest absence rather than a guess.
+    ///
+    /// **`SET LOCAL statement_timeout` is what is left of `deadline`, scoped to a transaction this
+    /// call opens and always rolls back** - `docs/adr/0029`'s Postgres row. The lock is acquired
+    /// FIRST, then the deadline is re-checked: the wait for it is itself outside the deadline, so a
+    /// caller queued behind a slow statement can arrive already spent, refused locally as
+    /// `DeadlineSpent` rather than sent to the server.
+    fn dry_run(&self, executable: Executable<'_>, presented: &Presented, deadline: Deadline) -> Result<PreFlight, Self::Error> {
         self.deliverable(presented)?;
         let query = Self::render(executable)?;
-        drop(
-            self.runtime
-                .block_on(self.client.prepare(query.sql()))
-                .map_err(|cause| PostgresError::Prepare { cause })?,
-        );
-        Ok(PreFlight::Accepted)
+        self.prepare_with_deadline(&query, deadline)?;
+        Ok(PreFlight::Accepted { estimated_bytes: None })
     }
 
-    fn execute(&self, executable: Executable<'_>, presented: &Presented) -> Result<RowSet, Self::Error> {
+    /// `SET LOCAL statement_timeout` is what is left of `deadline` - `docs/adr/0029`'s Postgres row.
+    fn execute(&self, executable: Executable<'_>, presented: &Presented, deadline: Deadline) -> Result<RowSet, Self::Error> {
         self.deliverable(presented)?;
         let query = Self::render(executable)?;
-        self.run(&query)
+        self.run_with_deadline(&query, deadline)
     }
 
     fn verify_anchor(&self, plan: sutura_domain::plan::AnchorPlan<'_>) -> Result<AnchorRows, Self::Error> {
@@ -841,148 +953,36 @@ impl Warehouse for PostgresWarehouse {
         let rows = self.run(&query)?;
         KeyUniqueness::read(&rows).map_err(|cause| PostgresError::KeyCounts { cause })
     }
+
+    fn execute_raw(
+        &self,
+        statement: &sutura_domain::raw::RawStatement,
+        presented: &Presented,
+    ) -> sutura_domain::warehouse::RawExecution<Self::Error> {
+        Some(self.run_raw(statement, presented))
+    }
+
+    /// Refuses `25006 read_only_sql_transaction`/`42501 insufficient_privilege` as the data system
+    /// saying no, the same split the certified path already draws - see `raw` for the match itself.
+    fn source_refused(&self, error: &Self::Error) -> bool {
+        raw::source_refused(error)
+    }
+
+    /// `57014 query_canceled` (via `Prepare`/`Execute`) or a local `DeadlineSpent` - see
+    /// `deadline::deadline_exceeded` for the match itself, the same split `raw::source_refused`
+    /// draws for its own two codes.
+    fn deadline_exceeded(&self, error: &Self::Error) -> bool {
+        deadline::deadline_exceeded(error)
+    }
 }
+
+// `docs/adr/0013`'s raw SQL tool's own execution path - carved out because this file hit the
+// thousand-line limit `cargo xtask max-lines` enforces.
+mod raw;
+
+// `docs/adr/0029`'s per-statement `SET LOCAL statement_timeout` mechanism - carved out for the same
+// reason.
+mod deadline;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sutura_domain::warehouse::Value;
-
-    /// The wire bytes for a `NUMERIC`: two bytes each of digit count, weight, sign and display
-    /// scale, then the base-10000 digits. Built big-endian exactly as the documented format.
-    #[expect(
-        clippy::big_endian_bytes,
-        reason = "the NUMERIC wire format is documented big-endian, which is exactly what the test \
-                  helper writes"
-    )]
-    fn numeric_bytes(digits: &[u16], weight: i16, sign: u16, dscale: u16) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 + 2 * digits.len());
-        out.extend_from_slice(&u16::try_from(digits.len()).unwrap_or(0).to_be_bytes());
-        out.extend_from_slice(&weight.to_be_bytes());
-        out.extend_from_slice(&sign.to_be_bytes());
-        out.extend_from_slice(&dscale.to_be_bytes());
-        for &digit in digits {
-            out.extend_from_slice(&digit.to_be_bytes());
-        }
-        out
-    }
-
-    fn decode(digits: &[u16], weight: i16, sign: u16, dscale: u16) -> PgNumeric {
-        decode_numeric(&numeric_bytes(digits, weight, sign, dscale)).expect("a valid NUMERIC decodes")
-    }
-
-    #[test]
-    fn an_integral_numeric_that_fits_is_an_integer_cell() {
-        // 300 as NUMERIC(,0): one base-10000 digit, weight 0.
-        assert_eq!(
-            numeric_cell(&decode(&[300], 0, 0x0000, 0), "total").unwrap(),
-            Value::Integer(300)
-        );
-        // 10000 = 1·10000^1, weight 1.
-        assert_eq!(
-            numeric_cell(&decode(&[1], 1, 0x0000, 0), "total").unwrap(),
-            Value::Integer(10_000)
-        );
-    }
-
-    #[test]
-    fn a_fractional_numeric_is_exact_text() {
-        // 100.5 = 100·10000^0 + 5000·10000^-1, declared scale 1.
-        assert_eq!(
-            numeric_cell(&decode(&[100, 5000], 0, 0x0000, 1), "mean").unwrap(),
-            Value::Text(String::from("100.5"))
-        );
-        // The declared scale renders 5000·10000^-1 as 0.5, not 0.5000.
-        assert_eq!(
-            numeric_cell(&decode(&[5000], -1, 0x0000, 1), "mean").unwrap(),
-            Value::Text(String::from("0.5"))
-        );
-        // The wire's declared scale is preserved exactly.
-        assert_eq!(
-            numeric_cell(&decode(&[100], 0, 0x0000, 2), "mean").unwrap(),
-            Value::Text(String::from("100.00"))
-        );
-        // The absent 10^-4 group implied by weight -2 is still part of the value.
-        assert_eq!(
-            numeric_cell(&decode(&[1000], -2, 0x0000, 5), "mean").unwrap(),
-            Value::Text(String::from("0.00001"))
-        );
-    }
-
-    #[test]
-    fn a_negative_numeric_keeps_its_sign_exactly() {
-        assert_eq!(
-            numeric_cell(&decode(&[300], 0, 0x4000, 0), "total").unwrap(),
-            Value::Integer(-300)
-        );
-        assert_eq!(
-            numeric_cell(&decode(&[100, 5000], 0, 0x4000, 1), "mean").unwrap(),
-            Value::Text(String::from("-100.5"))
-        );
-    }
-
-    #[test]
-    fn a_non_finite_numeric_is_refused_as_a_non_finite_cell() {
-        assert!(matches!(
-            numeric_cell(&decode(&[0], 0, 0xC000, 0), "mean"),
-            Err(PostgresError::NotFinite { .. })
-        ));
-        assert!(matches!(
-            numeric_cell(&decode(&[0], 0, 0xD000, 2), "mean"),
-            Err(PostgresError::NotFinite { .. })
-        ));
-    }
-
-    #[test]
-    fn a_numeric_wider_than_i64_stays_exact_text() {
-        // 10^20 is beyond i64 and must not be rounded or refused.
-        assert_eq!(
-            numeric_cell(&decode(&[1], 5, 0x0000, 0), "total").unwrap(),
-            Value::Text(String::from("100000000000000000000"))
-        );
-    }
-
-    #[test]
-    fn a_truncated_numeric_header_is_a_decoder_error() {
-        let short = decode_numeric(&[0, 1, 0]).expect_err("fewer than the eight header bytes");
-        assert!(short.to_string().contains("shorter"), "{short}");
-        // Eight header bytes but claims a digit it does not carry.
-        let missing_digit = decode_numeric(&[0, 1, 0, 0, 0, 0, 0, 0]).expect_err("claims a digit that is not there");
-        assert!(missing_digit.to_string().contains("value was truncated"), "{missing_digit}");
-    }
-
-    #[test]
-    fn pg_date_round_trips_through_the_epoch_offset() {
-        // The driver's epoch (2000-01-01) is day 0 in its own numbering.
-        assert_eq!(PgDate { days: 0 }.to_domain_days(), 10_957);
-        // The domain epoch (1970-01-01) is the driver's -10957.
-        assert_eq!(PgDate::from_domain(0).days, -10_957);
-        assert_eq!(PgDate::from_domain(0).to_domain_days(), 0);
-    }
-
-    #[test]
-    fn a_statement_timeout_is_a_u32_ceiling_or_it_is_refused() {
-        // The tuning value becomes a `SET statement_timeout = N` line verbatim, so it is a typed
-        // ceiling at the boundary: a number that fits parses...
-        assert_eq!(parse_statement_timeout("15000").expect("a number parses"), 15_000);
-        assert_eq!(parse_statement_timeout("0").expect("zero is a valid timeout"), 0);
-        assert_eq!(
-            parse_statement_timeout(&u32::MAX.to_string()).expect("the ceiling parses"),
-            u32::MAX
-        );
-        // ...and anything that cannot be a `u32` is refused rather than reaching the statement.
-        // `u32::MAX + 1` is the ceiling's far side, and decimals are refused rather than truncated.
-        assert!(matches!(
-            parse_statement_timeout("not-a-number"),
-            Err(PostgresError::InvalidStatementTimeout { .. })
-        ));
-        assert!(matches!(
-            parse_statement_timeout("4294967296"),
-            Err(PostgresError::InvalidStatementTimeout { .. })
-        ));
-        assert!(matches!(
-            parse_statement_timeout("15000.5"),
-            Err(PostgresError::InvalidStatementTimeout { .. })
-        ));
-    }
-}
+mod tests;

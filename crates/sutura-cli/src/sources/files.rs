@@ -116,7 +116,7 @@ pub(super) fn from_the_built_in_declaration(
 /// compares them, and it is called against THIS adapter's own constant - the same call
 /// `sutura-serve`'s `build_engine` makes.
 ///
-/// **The table set comes back because it is evidence rather than bookkeeping.** [`super::refuse_unattached`]
+/// **The table set comes back because it is evidence rather than bookkeeping.** [`sutura_app::preflight::refuse_unattached`]
 /// compares it against the bundle a service re-loads, and the two bundles are two loads.
 pub(super) fn open(
     source: &SourceName,
@@ -247,6 +247,8 @@ mod tests {
             Opened::Files(opened) => Some(opened),
             #[cfg(feature = "bigquery")]
             Opened::BigQuery(_) => None,
+            #[cfg(feature = "postgres")]
+            Opened::Postgres(_) => None,
         }
         .expect("this fixture declares a files source")
     }

@@ -22,15 +22,18 @@ use sutura_domain::calendar::{Date, TimeRange};
 use sutura_domain::identity::Presented;
 use sutura_domain::model::{Aggregate, ColumnName, Grain, MetricName, SourceName, TableName};
 use sutura_domain::plan::{
-    PlanBucket, PlanColumn, PlanFilter, PlanMeasure, PlanPredicate, PlanTerm, PredicateOrigin, QueryPlan, ResultLabel,
-    StatementTables,
+    PlanBindings, PlanBucket, PlanColumn, PlanFilter, PlanMeasure, PlanPredicate, PlanTerm, PredicateOrigin, QueryPlan,
+    ResultLabel, StatementTables,
 };
 use sutura_domain::source::{AcknowledgementReason, SharedIdentityDeclared, SourcePosture};
+use sutura_domain::warehouse::deadline::{Budget, Deadline};
+use sutura_domain::warehouse::estimate::EstimatedBytes;
 use sutura_domain::warehouse::{ParamValue, Value};
 
 use crate::BigQueryWarehouse;
 use crate::transport::{
-    Cell, DatasetAddress, DatasetId, Field, FieldType, HeldTables, JobRequest, JobRows, JobTransport, ListingTotal, ProjectId,
+    Cell, DatasetAddress, DatasetId, Field, FieldType, HeldTables, JobDeadline, JobRequest, JobRows, JobTransport, ListingTotal,
+    ProjectId,
 };
 
 // ------------------------------------------------------------------------------ the fake ----
@@ -50,6 +53,11 @@ pub(super) struct Asked {
     pub(super) project: String,
     pub(super) dataset: String,
     pub(super) subject: Option<String>,
+    /// Which clock this call answered to - `JobDeadline::Port` for a request-time call,
+    /// `JobDeadline::Boot` for `verify_anchor`. This is F1's own seam: the port's `Deadline` has to
+    /// cross into `JobRequest` unmangled, and a fake that recorded nothing here could not catch a
+    /// call site that silently swapped one arm for the other.
+    pub(super) deadline: JobDeadline,
 }
 
 /// A transport that records what it was asked and answers with what a test handed it.
@@ -59,6 +67,9 @@ pub(super) struct Asked {
 /// as a statement carrying it and a parameter list one short.
 pub(super) struct Recording {
     answer: JobRows,
+    /// What a dry run answers with. `None` by default - the honest absence `docs/adr/0030` names -
+    /// set with [`Self::estimating`] for the test that asserts the carry rather than the asking.
+    estimate: Option<EstimatedBytes>,
     pub(super) seen: RefCell<Vec<Asked>>,
     pub(super) validated: RefCell<usize>,
     /// What each dataset holds, keyed by the `project/dataset` pair a listing was asked for.
@@ -81,11 +92,22 @@ impl Recording {
     pub(super) fn answering(answer: JobRows) -> Self {
         Self {
             answer,
+            estimate: None,
             seen: RefCell::new(Vec::new()),
             validated: RefCell::new(0),
             holding: BTreeMap::new(),
             listed: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The same fake, told what a dry run should answer as the endpoint's own byte estimate.
+    ///
+    /// Chainable, so a test opts in explicitly rather than every `Recording` carrying a number it
+    /// never asked for - the default stays `None`, the honest absence this adapter's other callers
+    /// exercise.
+    pub(super) fn estimating(mut self, bytes: u64) -> Self {
+        self.estimate = Some(EstimatedBytes::parse(bytes));
+        self
     }
 
     /// The same fake, told which tables one dataset holds. Chainable, so two datasets are two calls.
@@ -136,6 +158,7 @@ impl Recording {
             // Exposed only here, in a test, where the whole point is to assert the exact bearer the
             // adapter forwarded. Production code never reads it as text.
             subject: request.subject_bearer().map(|secret| String::from(secret.expose_secret())),
+            deadline: request.deadline(),
         });
     }
 }
@@ -148,10 +171,10 @@ impl JobTransport for Recording {
         Ok(self.answer.clone())
     }
 
-    fn validate(&self, request: &JobRequest<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, request: &JobRequest<'_>) -> Result<crate::transport::DryRunEstimate, Self::Error> {
         self.record(request);
         *self.validated.borrow_mut() += 1;
-        Ok(())
+        Ok(self.estimate)
     }
 
     /// Answers from what a test handed over, and records which pair was asked.
@@ -203,7 +226,7 @@ impl JobTransport for Refusing {
         Err(ListingRefused)
     }
 
-    fn validate(&self, _request: &JobRequest<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, _request: &JobRequest<'_>) -> Result<crate::transport::DryRunEstimate, Self::Error> {
         Err(ListingRefused)
     }
 
@@ -243,7 +266,7 @@ impl JobTransport for Broken {
         Err(EndpointSaidNo)
     }
 
-    fn validate(&self, _request: &JobRequest<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, _request: &JobRequest<'_>) -> Result<crate::transport::DryRunEstimate, Self::Error> {
         Err(EndpointSaidNo)
     }
 
@@ -313,6 +336,15 @@ pub(super) fn leg_of(posture: &SourcePosture) -> Presented {
     }
 }
 
+/// The port's deadline every test here executes under - a generous budget, since none of these
+/// assertions are about time.
+pub(super) fn test_deadline() -> Deadline {
+    Deadline::opened_at(
+        std::time::Instant::now(),
+        Budget::parse(std::time::Duration::from_secs(30)).expect("thirty seconds is a budget"),
+    )
+}
+
 pub(super) fn open<T>(transport: T, posture: SourcePosture) -> BigQueryWarehouse<T>
 where
     T: JobTransport,
@@ -349,23 +381,26 @@ pub(super) fn plan() -> QueryPlan {
             },
         },
         ResultLabel::measure(&MetricName::parse("mrr").expect("a test metric is a metric")),
-        vec![
-            PlanFilter::new(
-                PredicateOrigin::Definition,
-                PlanPredicate::AtOrAfter {
-                    column: column("month"),
-                    param: 0,
-                },
-            ),
-            PlanFilter::new(
-                PredicateOrigin::Definition,
-                PlanPredicate::Before {
-                    column: column("month"),
-                    param: 1,
-                },
-            ),
-        ],
-        vec![ParamValue::Date(day("2026-06-01")), ParamValue::Date(day("2026-07-01"))],
+        PlanBindings::parse(
+            vec![
+                PlanFilter::new(
+                    PredicateOrigin::Definition,
+                    PlanPredicate::AtOrAfter {
+                        column: column("month"),
+                        param: 0,
+                    },
+                ),
+                PlanFilter::new(
+                    PredicateOrigin::Definition,
+                    PlanPredicate::Before {
+                        column: column("month"),
+                        param: 1,
+                    },
+                ),
+            ],
+            vec![ParamValue::Date(day("2026-06-01")), ParamValue::Date(day("2026-07-01"))],
+        )
+        .expect("a fixture plan binds its two range bounds in placeholder order"),
         TimeRange::new(day("2026-06-01"), day("2026-07-01")).expect("a test range is a range"),
     )
 }
@@ -403,7 +438,7 @@ impl JobTransport for Paged {
         Err(OnePageOfMore)
     }
 
-    fn validate(&self, _request: &JobRequest<'_>) -> Result<(), Self::Error> {
+    fn validate(&self, _request: &JobRequest<'_>) -> Result<crate::transport::DryRunEstimate, Self::Error> {
         Err(OnePageOfMore)
     }
 
@@ -420,5 +455,44 @@ impl JobTransport for Paged {
     #[cfg(feature = "fixtures")]
     fn apply(&self, _request: &JobRequest<'_>) -> Result<(), Self::Error> {
         Err(OnePageOfMore)
+    }
+}
+
+/// A transport whose failure IS the port's own deadline running out.
+///
+/// Its own type for [`Paged`]'s reason: what is under test is that `BigQueryWarehouse::deadline_exceeded`
+/// asks the TRANSPORT rather than guessing, and only a transport whose predicate answers `true` for an
+/// error indistinguishable, at this level, from any other can show the delegation happening.
+pub(super) struct TimedOut;
+
+/// The port's budget being gone, as a transport would report it.
+#[derive(Debug, thiserror::Error)]
+#[error("this call's budget was spent")]
+pub(super) struct BudgetSpent;
+
+impl JobTransport for TimedOut {
+    type Error = BudgetSpent;
+
+    fn run(&self, _request: &JobRequest<'_>) -> Result<JobRows, Self::Error> {
+        Err(BudgetSpent)
+    }
+
+    fn validate(&self, _request: &JobRequest<'_>) -> Result<crate::transport::DryRunEstimate, Self::Error> {
+        Err(BudgetSpent)
+    }
+
+    fn deadline_exceeded(&self, _error: &Self::Error) -> bool {
+        true
+    }
+
+    // This fake is about a failure, so the listing fails the same way the others do.
+    fn list_tables(&self, _at: &DatasetAddress) -> Result<HeldTables, Self::Error> {
+        Err(BudgetSpent)
+    }
+
+    // This fake is about a failure, so the fixtures method fails the same way the others do.
+    #[cfg(feature = "fixtures")]
+    fn apply(&self, _request: &JobRequest<'_>) -> Result<(), Self::Error> {
+        Err(BudgetSpent)
     }
 }

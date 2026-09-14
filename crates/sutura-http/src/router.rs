@@ -4,12 +4,13 @@
 //!
 //! | Tier | Reachable by | Rate limit | Token |
 //! | --- | --- | --- | --- |
-//! | liveness | anybody who can route a packet | public | no |
+//! | liveness and direct protected-resource discovery | anybody who can route a packet | public | no |
 //! | documentation | anybody, when it is served at all | public | yes, when one is configured |
 //! | `v1` | a caller with the token, when one is configured | general | yes, when one is configured |
 //!
 //! Liveness has no token because a probe has no credential to present, which is exactly why its
-//! body carries nothing.
+//! body carries nothing. Protected-resource metadata has no token because it tells a direct-mode
+//! client where authorization happens; its two configured fields are the whole public document.
 //!
 //! # Layer order, and why it reads backwards
 //!
@@ -46,8 +47,9 @@
 //! **The consequence, stated rather than discovered later:** a path under the version prefix that
 //! matches no route skips the gate and falls through to the top-level `404`. So an unauthenticated
 //! caller can learn which paths exist, though not what is behind them - and the paths are in the
-//! published interface description anyway. Every path that resolves to a handler does hold a
-//! credential. There is a test on each half of that.
+//! published interface description anyway. Apart from liveness and the direct-only protected-resource
+//! document, every path that resolves to a handler does hold a credential when one is configured.
+//! There is a test on each half of that.
 //!
 //! # Why this returns a `Result`
 //!
@@ -223,7 +225,10 @@ pub fn assemble(state: &ServiceState) -> Result<Assembled, RouterNotBuilt> {
     // is left to forget is a row in `crate::capability::governed`, and `governed_routes` below refuses
     // to assemble over one that is missing.
     governed_routes()?;
-    let versioned = versioned.route_layer(axum::middleware::from_fn(crate::capability::require_capability));
+    let versioned = versioned.route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        crate::capability::require_capability,
+    ));
     // Then leg 1, if this deployment has it: a verified caller, or a `401` with a challenge. INSIDE
     // the deployment token gate added below, because `Router::layer` wraps what is already there - so
     // the cheap comparison runs first and a signature verification is not work an unauthenticated
@@ -240,19 +245,32 @@ pub fn assemble(state: &ServiceState) -> Result<Assembled, RouterNotBuilt> {
         versioned.layer(middleware::disabled_rate_limit_layer())
     };
 
-    // Liveness. No token, and the tighter tier: nothing here is worth polling faster than that.
-    let liveness: Router = Router::from(
+    // Public discovery and liveness. No token, and the tighter tier: nothing here is worth polling
+    // faster than that. Protected-resource metadata exists only when the attached gate directly
+    // validates bearer tokens; gateway and single-player modes contribute an empty router.
+    let public: Router = Router::from(
         OpenApiRouter::new()
             .routes(utoipa_axum::routes!(routes::health::liveness))
             .with_state(state.clone()),
+    )
+    // `merge` inserts the other router's paths again. Disable Axum's legacy `:param`/`*wild`
+    // marker check only after the fixed liveness route was registered, immediately before the
+    // configured metadata route whose literal resource path may contain a segment beginning `:`
+    // or `*`.
+    .without_v07_checks()
+    .merge(
+        state
+            .inbound_identity()
+            .and_then(|gate| gate.protected_resource())
+            .map_or_else(Router::new, crate::routes::protected_resource::ProtectedResource::router),
     );
-    let liveness = if limits.enabled() {
+    let public = if limits.enabled() {
         let (layer, handle) =
             middleware::probe_rate_limit_layer(state.metrics(), limits.probe(), key.clone()).map_err(limiter)?;
         limiters.push(handle);
-        liveness.layer(layer)
+        public.layer(layer)
     } else {
-        liveness.layer(middleware::disabled_rate_limit_layer())
+        public.layer(middleware::disabled_rate_limit_layer())
     };
     // The metrics endpoint. On the ONE listener (Decision 2 of `docs/adr/0015`), outside the
     // version prefix so a scrape config survives a version bump, and gated by its own token - never
@@ -284,15 +302,19 @@ pub fn assemble(state: &ServiceState) -> Result<Assembled, RouterNotBuilt> {
     limiters.extend(documentation_limiter);
 
     let router = Router::new()
-        .merge(liveness)
         .merge(documentation)
         .merge(metrics)
         .merge(versioned)
+        // Both ordinary subtrees registered every route above with Axum's checks enabled. The escape
+        // begins only at the final merge of the already-built public subtree for the same literal
+        // resource-path reason stated at its first merge.
+        .without_v07_checks()
+        .merge(public)
         // The request bound, as a middleware of ours rather than `tower_http`'s: that one answers
         // the status with an EMPTY body, and every `408` this surface documents carries a
         // `ProblemBody`. See `middleware::enforce_timeout`.
         .layer(axum::middleware::from_fn_with_state(
-            settings.server().request_timeout().duration(),
+            settings.server().request_timeout(),
             middleware::enforce_timeout,
         ))
         // Outermost, so a request refused by any layer below still produces a span and a timing.
@@ -485,7 +507,7 @@ fn documentation(state: &ServiceState, settings: &Settings, key: &ClientAddress)
     }
     // Serialized once, at startup, and served from a clone. Serializing per request would put a few
     // hundred kilobytes of work behind a path a caller can poll.
-    let json = match crate::openapi::document_json() {
+    let json = match crate::openapi::document_json(settings.tools().run_sql_enabled()) {
         Ok(json) => json,
         Err(cause) => {
             // Not fatal, and deliberately not: this service's job is answering questions, and a

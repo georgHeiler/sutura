@@ -16,9 +16,19 @@ through `sutura-sql` (`Dialect::Postgres`); nothing here is compiled or translat
 
 ## Limits
 
-- `NoTls`, unconditional: a `hostssl`-only server refuses this connection.
-- A `statement_timeout` is set at connect, so a slow server statement cannot hold a
-  blocking-pool thread past the caller's request deadline.
+- **No transport of its own.** `PostgresWarehouse::connect` opens with no TLS at all; the
+  verifying path is `PostgresWarehouse::connect_secured`, which takes the
+  `rustls::ClientConfig` a composition root built from the declared channel
+  (`tls::client_config`). Which source gets which is `sutura_config::sources::transport`'s
+  decision and never this adapter's, so a caller that builds no config gets a cleartext
+  connection - including to a server that offers TLS.
+- **`dry_run` and `execute` stop at the port's deadline**, with `SET LOCAL statement_timeout` -
+  `docs/adr/0029`'s Postgres row. The wait for `execution_lock` is itself outside the deadline;
+  a caller already spent once the lock is held is refused locally as `DeadlineSpent`. `57014
+  query_canceled` is also what a manual `pg_cancel_backend` produces - indistinguishable to
+  `deadline_exceeded`. The raw SQL tool's own path (`execute_raw`) carries no per-request
+  deadline; it is stopped by the connect-time `SET statement_timeout` that already existed, and
+  this record adds only classifying that stop.
 
 ## `enum PostgresError`
 
@@ -40,6 +50,10 @@ Why this data system could not answer.
 - `NotADate` - A day came back that is not a date this build can represent.
 - `Shape`
 - `KeyCounts` - A key probe's result was not the pair of counts its statement projects.
+
+  A defect in the rendering or in this adapter's value mapping rather than anything about the
+  data - two aggregates over no group produce one row of two integers - and it travels as an
+  `Err` from the port, which the boot path reads as *this declaration went unchecked*.
 - `Render`
 - `Fixture` - A fixture import failed.
 - `FixtureRead`
@@ -47,9 +61,26 @@ Why this data system could not answer.
 - `FixtureSchema` - The shared conformance fixture schema could not be inferred.
 - `InvalidSchemaName` - A schema name this adapter was asked to open that is not a word. Refused, not interpolated.
 - `InvalidStatementTimeout` - The dev-only `statement_timeout` tuning value is not a `u32` millisecond count.
+
+  The value becomes a `SET statement_timeout = N` line verbatim, so it is parsed at the
+  boundary and refused if it is not a number or exceeds the `u32` ceiling - a value that
+  cannot be a timeout must not reach the statement as uninterpreted text. The cause
+  survives so the operator sees the number did not parse, not a plain refusal.
+- `RawTransaction` - The raw SQL tool's own `BEGIN READ ONLY` or `ROLLBACK` did not run - sutura's own fixed text on the simple query protocol (`docs/adr/0013`), never the caller's.
+- `Transaction` - The certified path's own per-statement transaction (`docs/adr/0029`) did not open - sutura's own fixed literal text, never the caller's, the same as `Self::RawTransaction`.
+- `DeadlineSpent` - The deadline was already spent once `PostgresWarehouse::execution_lock` was acquired - refused locally, no round trip: that unbounded wait is outside `sutura_app`'s own pre-call check.
 - `NoPlaceForASubject` - The credential broker handed this adapter subject material it has nowhere to put.
 - `PresentedDisagreesWithPosture`
-- `LegWithoutCombiner` - One leg of a federated answer, which nothing here can assemble above.
+- `LegWithoutCombiner` - A leg without a combiner.
+- `AnchorsRead` - The declared trust anchors could not be read or parsed.
+- `AnchorsEmpty` - The declared trust anchors parsed to no certificates.
+- `IdentityRead` - The declared client identity could not be read.
+- `IdentityIncomplete` - The declared client certificate parsed to no certificate, or the key to no key.
+- `IdentityKey` - The client key was not an RSA/EC key this build can present.
+- `SystemStoreRead` - The explicitly selected host trust store could not be read completely.
+- `SystemStoreEmpty` - The explicitly selected host trust store held no roots.
+- `SystemStoreCertificate` - A certificate returned by the host trust-store reader was not a usable root.
+- `TlsConfiguration` - The cryptographic provider could not construct a client verifier.
 
 ### Implements
 
@@ -70,7 +101,9 @@ pub fn connect(source: sutura_domain::model::SourceName, posture: sutura_domain:
 ```
 
 Opens one connection under the supplied `tokio_postgres::Config` and keeps it for this
-adapter's life.
+adapter's life, over no transport security. The fixture tier's path (unix socket, loopback),
+and the composition root's `plaintext` choice - the caller has already refused a
+non-loopback plaintext host.
 
 ```rust
 pub fn connect_in_schema(source: sutura_domain::model::SourceName, posture: sutura_domain::source::SourcePosture, config: &tokio_postgres::Config, schema: &str) -> Result<Self, PostgresError>
@@ -79,6 +112,17 @@ pub fn connect_in_schema(source: sutura_domain::model::SourceName, posture: sutu
 Like `connect`, but every unqualified table name resolves to a fresh,
 private schema - so several warehouses can share one Postgres without clobbering each other.
 The caller-supplied schema name is validated to a word before it reaches `CREATE SCHEMA`.
+
+```rust
+pub fn connect_secured(source: sutura_domain::model::SourceName, posture: sutura_domain::source::SourcePosture, config: &tokio_postgres::Config, tls: Option<rustls::ClientConfig>) -> Result<Self, PostgresError>
+```
+
+Opens one connection under the supplied `config`, secured as the caller resolved.
+
+`tls` is `None` for a `plaintext` channel and a ready-built `rustls::ClientConfig` for
+`verified` and `mutual` channels. Both are produced by the composition root, which is the
+only place that can see the declared `sutura_config::sources::transport::SourceTransport` -
+this adapter takes the resolved material rather than a second copy of the three-state shape.
 
 ```rust
 pub fn load_csv(&self, table: &TableName, path: &Path) -> Result<(), PostgresError>
@@ -112,13 +156,69 @@ it was handed whenever nothing was set. There is no unconfigured state to substi
 
 `Debug`, `Warehouse`
 
+## Module `connection`
+
+The driver configuration for one declared PostgreSQL connection.
+
+A composition root owns mapping its source declaration into these values. This module owns the
+driver-specific half: how TCP and unix-socket targets are represented to `tokio-postgres`, and
+reading the password file once at boot. Keeping that here means both shipped composition roots
+reach the same driver behaviour without depending on each other.
+
+### `enum ConnectionTarget`
+
+```rust
+pub enum ConnectionTarget<'a>
+```
+
+The address a PostgreSQL source is dialled through.
+
+#### Variants
+
+- `Host` - A TCP host name or address.
+- `UnixSocket` - A unix socket directory.
+
+#### Implements
+
+`Clone`, `Copy`
+
+### `struct PasswordFileUnreadable`
+
+```rust
+pub struct PasswordFileUnreadable
+```
+
+The declared password file could not be read while the connection was built.
+
+#### Implements
+
+`Debug`, `Display`, `Error`
+
+### `fn config`
+
+```rust
+pub fn config(target: ConnectionTarget<'_>, port: u16, database: &str, user: &str, password_file: &std::path::Path) -> Result<tokio_postgres::Config, PasswordFileUnreadable>
+```
+
+Builds the driver configuration for one declared PostgreSQL connection.
+
+The password is trimmed exactly once after reading, so a trailing newline from a mounted secret
+is not part of the credential, then parsed into `Secret`. The read `String` is shadowed by
+that `Secret`, not dropped - it is not zeroised, and it lives unzeroised until this function
+returns. The returned config does not select TLS; `crate::PostgresWarehouse::connect_secured`
+makes a supplied TLS client mandatory before it dials.
+
+# Errors
+
+Returns `PasswordFileUnreadable` when `password_file` cannot be read.
+
 ## Module `fixture`
 
 The fixture tier's credential - a value that cannot exist unconfigured.
 
 **Behind the default-off `fixtures` feature**, because both callers are tests
 (`crates/sutura-exec-postgres/tests/conformance.rs` and
-`crates/sutura-app/tests/adapters/mod.rs`) and `nix/shipped.nix` builds cargo's DEFAULT set: so
+`crates/sutura-app/tests/adapters/adapters.rs`) and `nix/shipped.nix` builds cargo's DEFAULT set: so
 no artefact a release publishes contains this module or the connection config over it, which
 deletes the *reachable from a consumer* half rather than hardening it. `--all-features` compiles,
 lints and tests it on every run.
@@ -151,9 +251,11 @@ and there is no branch left for a fallback to live in.
 **The provisioner publishes them, and it is not the compose file.** There is no Postgres
 service in `compose.services.yaml` at all - this tier is nixpkgs' `postgresql_18`, started by
 `nix/postgres-tier.nix`, which now generates a password per worktree and prints the three
-exports from `sutura-postgres-tier credentials`. `nix/with-tier.sh` evaluates them exactly where
-it already exports `SUTURA_DEV_REQUIRE_TIER`, so *the server is there* and *the client knows how
-to log in* cannot come apart, and `checks.postgres-tier` drives that subcommand's two answers.
+credential exports from `sutura-postgres-tier credentials`, plus the loopback listener's CA and
+client pair. Those are read by the TLS cells rather than here.
+`nix/with-tier.sh` evaluates them exactly where it already exports `SUTURA_DEV_REQUIRE_TIER`, so
+*the server is there* and *the client knows how to log in* cannot come apart, and
+`checks.postgres-tier` drives that subcommand's two answers.
 
 The variables are `SUTURA_POSTGRES_TIER_*` rather than the old `SUTURA_DEV_*`: the names were
 shared with the compose fixture credential while nothing in that file provisions a Postgres, and
@@ -250,3 +352,111 @@ purpose - see that function for why the seam is there.
 #### Implements
 
 `Debug`
+
+## Module `tls`
+
+Building the `rustls::ClientConfig` a TLS `postgres` source channel verifies with.
+
+This is the TLS half of `sutura_config::sources::transport`, turned into a verifier. That module
+owns the three-state DECLARATION (`plaintext` / `verified` / `mutual`); this one owns turning a
+declared `verified` or `mutual` channel into the thing the driver connects with: read the anchor
+store, read the optional client identity, and refuse the combinations a closed type refuses.
+
+The two crates do not share a dependency, so this module's input is the RESOLVED material a
+composition root extracted from the declaration - the same boundary `connect_secured`'s own
+signature draws, and the reason the adapters here never carry a second copy of the three-state
+shape. What a composition root hands this module is: whether the declared anchors are a PEM
+bundle or the host's system store, and an optional client identity path pair.
+
+# What fails here, and why it is a connect-time refusal
+
+Configuration refuses what only a tree can see (an unknown `transport_mode` word, TLS naming no
+anchors, a partial identity, a relative path). What this module refuses is what only a file and
+a TLS implementation can answer - and each refusal is fail-closed and names the path:
+
+* anchors that cannot be read (`PostgresError::AnchorsRead`) or parse to no certificates
+  (`PostgresError::AnchorsEmpty`);
+* a `system` store that cannot be read completely or contains no usable roots
+  (`PostgresError::SystemStoreRead`, `PostgresError::SystemStoreEmpty`);
+* an identity half that cannot be read (`PostgresError::IdentityRead`) or parses to the wrong
+  kind (`PostgresError::IdentityIncomplete`, `PostgresError::IdentityKey`).
+
+An untrusted-issuer chain is not refused HERE: verification is the handshake's job, and a
+`ClientConfig` built over the declared roots is exactly the thing that refuses it. The
+tier-backed test that connects a source to a server under an unTRUSTED issuer is refused by
+`PostgresWarehouse::connect_secured`'s `PostgresError::Connect` arm at the handshake, while the
+construction half stays honest about what it can know: a `ClientConfig` whose roots are the
+declared file.
+
+The construction is always compiled (this crate is the source channel), so `checks.nextest`
+exercises every refusal above in-crate against `rcgen`-generated material, and `tests/tls.rs`
+drives the same construction against the tier's real server - where the two cells are that the
+declared anchor verifies and an issuer it does not name is refused.
+
+### `enum TlsAnchors`
+
+```rust
+pub enum TlsAnchors
+```
+
+The trust anchors a TLS source channel verifies against, resolved from the declaration.
+
+#### Variants
+
+- `Bundle` - A PEM bundle at this absolute path. Read by `client_config` once, at boot.
+- `System` - The host's own trust store, read once by `client_config`. This is reached only when the deployment explicitly wrote `transport_anchors: system`; it is never a fallback.
+
+#### Implements
+
+`Clone`, `Debug`, `Eq`, `PartialEq`
+
+### `struct TlsIdentity`
+
+```rust
+pub struct TlsIdentity
+```
+
+The client certificate and key a `mutual` channel presents, resolved from the declaration.
+
+A pair - configuration already refused a partial one at load; this module reads both paths and
+refuses a file that does not hold its half.
+
+#### Methods
+
+```rust
+pub fn certificate(&self) -> &Path
+```
+
+The declared client certificate path.
+
+```rust
+pub fn key(&self) -> &Path
+```
+
+The declared client key path.
+
+```rust
+pub const fn new(certificate: PathBuf, key: PathBuf) -> Self
+```
+
+A client identity from its declared paths.
+
+#### Implements
+
+`Clone`, `Debug`, `Eq`, `PartialEq`
+
+### `fn client_config`
+
+```rust
+pub fn client_config(anchors: &TlsAnchors, identity: Option<&TlsIdentity>) -> Result<rustls::ClientConfig, crate::PostgresError>
+```
+
+Builds the `rustls::ClientConfig` a TLS source channel verifies (and, for `mutual`, presents)
+with, from the resolved anchor material and an optional client identity.
+
+# Errors
+
+`SystemStoreRead`/`SystemStoreEmpty` for a host store that cannot supply a complete non-empty
+root set; `AnchorsRead` for a bundle that cannot be read; `AnchorsEmpty` for a bundle that parses
+to no certificates; `IdentityRead`/`IdentityIncomplete`/`IdentityKey` for an identity half that
+cannot be read or does not hold its kind.

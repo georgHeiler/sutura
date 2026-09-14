@@ -87,6 +87,13 @@ pub(crate) fn mcp(args: &[String]) -> ExitCode {
                 refuse_absent_tables(&pinned, &opened.engines)?;
                 serve(&catalog, opened, &settings)
             }
+            #[cfg(feature = "postgres")]
+            Opened::Postgres(opened) => {
+                // A `postgres` source attaches nothing and reports no table inventory, so
+                // `refuse_absent_tables` has nothing to add - the same reasoning `sutura-serve`'s own
+                // arm carries. A mistyped `table:` is caught on the first question against it.
+                serve(&catalog, opened, &settings)
+            }
         }
     })())
 }
@@ -127,10 +134,20 @@ where
     // releasing the engine then would abort this process. The outer handle below releases it on
     // the main thread, once `shutdown_timeout` has let that in-flight answer finish.
     let service = std::sync::Arc::new(service);
+    // Every capability EXCEPT the raw SQL tool unless this deployment turned it on - the same
+    // narrowing `sutura-http`'s capability layer applies, over the no-authentication case this
+    // transport always is: a pipe has no header a token could arrive in, so scope alone cannot
+    // keep the tool off, and `docs/adr/0013` requires it absent for every caller regardless.
+    let permitted = sutura_app::Permitted::every_capability();
+    let permitted = if settings.tools().run_sql_enabled() {
+        permitted
+    } else {
+        permitted.without(sutura_app::Capability::RunSql)
+    };
     let served = runtime
         .block_on(sutura_mcp::serve_stdio(
             std::sync::Arc::clone(&service),
-            sutura_app::Permitted::every_capability(),
+            permitted,
             prose,
             admission,
             reply,
@@ -181,7 +198,7 @@ where
     // for every one of its own. `Admission::from_settings` is what stops the two keys being read
     // from different places.
     Ok((
-        started(catalog, opened, settings.runtime())?,
+        started(catalog, opened, settings.runtime(), settings.spend_budget())?,
         catalog_prose(settings.prompt().catalog_prose()),
         Admission::from_settings(settings.runtime()),
         // **The peer's wait, and `telekom/sutura#339` is that it had no bound at all.** The same key
@@ -278,6 +295,8 @@ mod tests {
             crate::sources::Opened::Files(opened) => Some(opened),
             #[cfg(feature = "bigquery")]
             crate::sources::Opened::BigQuery(_) => None,
+            #[cfg(feature = "postgres")]
+            crate::sources::Opened::Postgres(_) => None,
         }
         .expect("the example declares a files source");
         (catalog, opened, settings)
