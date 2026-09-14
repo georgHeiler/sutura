@@ -114,6 +114,9 @@ fn the_same_question_under_a_roomy_ceiling_is_answered() {
         .expect("a thousand groups fit in 64 mebibytes");
     // A thousand distinct keys in one month: three columns - the bucket, the key and the measure.
     assert_eq!((rows.columns().len(), rows.rows().len()), (3, 1000));
+    // Nothing is left reserved once the answer is collected, which is what makes the ceiling a bound
+    // on concurrent work rather than a budget the process spends down over its lifetime.
+    assert_eq!(roomy.context.runtime_env().memory_pool.reserved(), 0);
 }
 
 #[test]

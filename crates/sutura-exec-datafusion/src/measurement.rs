@@ -1,23 +1,24 @@
 //! Opt-in measurement construction for bounded DataFusion execution.
 //!
-//! [`MeasuredWarehouse`] changes no ordinary construction path. It keeps the bounded
-//! [`PeakRecordingPool`] beside a fresh adapter so a child can read only the engine operators'
-//! reservation peak. It does not measure driver buffering, collected batches, domain-row conversion,
-//! or the process resident set.
+//! [`MeasuredWarehouse`](crate::measurement::MeasuredWarehouse) changes no ordinary construction
+//! path. It keeps a bounded recording pool beside a fresh adapter so a child can read only the engine
+//! operators' reservation peak. It does not measure driver buffering, collected batches, domain-row
+//! conversion, or the process resident set.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use datafusion::execution::memory_pool::MemoryPool;
+use datafusion::prelude::SessionConfig;
 use sutura_domain::identity::Presented;
 use sutura_domain::model::{SourceName, TableName};
 use sutura_domain::plan::{AnchorPlan, Executable};
 use sutura_domain::source::{ImpersonationCapability, SourcePosture};
 use sutura_domain::warehouse::cardinality::{DeclaredKey, KeyUniqueness};
+use sutura_domain::warehouse::deadline::Deadline;
 use sutura_domain::warehouse::{AnchorRows, PreFlight, RowSet, Warehouse};
 
-use crate::pool::PeakRecordingPool;
 use crate::{DataFusionError, DataFusionWarehouse, WorkingSet};
+use datafusion::execution::memory_pool::{MemoryPool as _, PeakRecordingPool};
 
 /// A measured warehouse and its persistent operator-reservation observer.
 ///
@@ -31,14 +32,12 @@ pub struct MeasuredWarehouse {
 
 impl MeasuredWarehouse {
     pub fn new(source: SourceName, posture: SourcePosture, working_set: WorkingSet) -> Result<Self, DataFusionError> {
-        let pool = Arc::new(PeakRecordingPool::new(Arc::new(
-            datafusion::execution::memory_pool::GreedyMemoryPool::new(working_set.bytes()),
-        )));
-        let (environment, _retained) = crate::pool::environment_with_pool(Arc::clone(&pool) as Arc<dyn MemoryPool>)?;
+        let (environment, pool) = crate::pool::recording_environment(working_set)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|cause| DataFusionError::Runtime { cause })?;
-        let warehouse = DataFusionWarehouse::from_parts(source, posture, working_set, environment, runtime);
+        let warehouse =
+            DataFusionWarehouse::from_bounded(source, posture, working_set, SessionConfig::new(), environment, runtime);
         Ok(Self { warehouse, pool })
     }
 
@@ -79,12 +78,12 @@ impl Warehouse for MeasuredWarehouse {
         self.warehouse.posture()
     }
 
-    fn dry_run(&self, executable: Executable<'_>, presented: &Presented) -> Result<PreFlight, Self::Error> {
-        self.warehouse.dry_run(executable, presented)
+    fn dry_run(&self, executable: Executable<'_>, presented: &Presented, deadline: Deadline) -> Result<PreFlight, Self::Error> {
+        self.warehouse.dry_run(executable, presented, deadline)
     }
 
-    fn execute(&self, executable: Executable<'_>, presented: &Presented) -> Result<RowSet, Self::Error> {
-        self.warehouse.execute(executable, presented)
+    fn execute(&self, executable: Executable<'_>, presented: &Presented, deadline: Deadline) -> Result<RowSet, Self::Error> {
+        self.warehouse.execute(executable, presented, deadline)
     }
 
     #[expect(

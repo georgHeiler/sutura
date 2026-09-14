@@ -43,9 +43,9 @@ in the conversion loop below. See `pool`, which states the gap rather than imply
 
 `translate`, `collect`, `fixture` and `pool` own narrow seams; this owns session and execution.
 
-**a gauge whose absence it currently specifies reads no `DataFusion` pool.** Measurement-only
-children observe a separate opt-in recorder; nothing in ordinary adapter construction exports a
-live reservation reading. The `check-guidance` absence rule rejects a production `.memory_pool()` call.
+**No production gauge reads the `DataFusion` pool.** Measurement-only children can opt into a
+separate recorder; ordinary adapter construction exports no live reservation reading. The
+`check-guidance` absence rule rejects a production `.memory_pool()` call.
 
 ## `enum DataFusionError`
 
@@ -258,16 +258,6 @@ The configured pool ceiling; `MemoryPool::memory_limit` can report `Unknown` ins
 
 `Debug`, `Drop`, `Warehouse`
 
-## `use MeasuredWarehouse`
-
-A measured warehouse and its persistent operator-reservation observer.
-
-It delegates the execution port unchanged. Ordinary `DataFusionWarehouse` construction retains
-its direct `GreedyMemoryPool`, so recording
-costs nothing outside an explicit measurement child.
-
-## `use PeakRecordingPool`
-
 ## `use WorkingSet`
 
 How many bytes the engine's operators may reserve at once.
@@ -285,13 +275,13 @@ adapter, so the composition root converts.
 
 ## Module `measurement`
 
-Opt-in peak recording for measurement-only children.
+Opt-in peak recording for measurement-only children, excluded from default builds.
 Opt-in measurement construction for bounded DataFusion execution.
 
-`MeasuredWarehouse` changes no ordinary construction path. It keeps the bounded
-`PeakRecordingPool` beside a fresh adapter so a child can read only the engine operators'
-reservation peak. It does not measure driver buffering, collected batches, domain-row conversion,
-or the process resident set.
+`MeasuredWarehouse` changes no ordinary construction
+path. It keeps a bounded recording pool beside a fresh adapter so a child can read only the engine
+operators' reservation peak. It does not measure driver buffering, collected batches, domain-row
+conversion, or the process resident set.
 
 ### `struct MeasuredWarehouse`
 
@@ -390,6 +380,11 @@ Not wrapped in `TrackConsumersPool` either, though it would improve the engine's
 reaches a caller is `sutura_domain::query::RefusalReason::ResourcesExhausted`,
 which carries the configured ceiling and deliberately nothing about what the question demanded.
 
+**No production gauge reads the `DataFusion` pool.** ADR 0015 specifies that absence because an
+operator-reservation reading is narrower than process memory. The opt-in measurement feature is
+a gauge whose absence it currently specifies for production: it observes a separate recording
+pool in fresh test children and exposes no accessor on the ordinary adapter.
+
 ### `struct WorkingSet`
 
 ```rust
@@ -429,5 +424,3 @@ rather than at the declaration it came from.
 #### Implements
 
 `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`
-
-### `use PeakRecordingPool`

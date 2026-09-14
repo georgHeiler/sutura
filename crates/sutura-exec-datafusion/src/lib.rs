@@ -34,13 +34,11 @@
 //!
 //! `translate`, `collect`, `fixture` and `pool` own narrow seams; this owns session and execution.
 //!
-//! **a gauge whose absence it currently specifies reads no `DataFusion` pool.** Measurement-only
-//! children observe a separate opt-in recorder; nothing in ordinary adapter construction exports a
-//! live reservation reading. The `check-guidance` absence rule rejects a production `.memory_pool()` call.
+//! **No production gauge reads the `DataFusion` pool.** Measurement-only children can opt into a
+//! separate recorder; ordinary adapter construction exports no live reservation reading. The
+//! `check-guidance` absence rule rejects a production `.memory_pool()` call.
 use std::path::Path;
-use std::sync::Arc;
 
-use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::{CsvReadOptions, DataFrame, ParquetReadOptions, SessionConfig, SessionContext};
 use sutura_domain::identity::{Presented, PresentedDisagreesWithPosture};
@@ -245,9 +243,9 @@ mod fixture;
 /// differs from a whole plan is the SHAPE of the plan, not how a piece of one renders.
 mod leg;
 
-/// Opt-in peak recording for measurement-only children.
+/// Opt-in peak recording for measurement-only children, excluded from default builds.
+#[cfg(feature = "measurement")]
 pub mod measurement;
-pub use crate::measurement::MeasuredWarehouse;
 
 /// The working-set ceiling.
 ///
@@ -255,7 +253,7 @@ pub use crate::measurement::MeasuredWarehouse;
 /// because it is a third seam, and because `lib.rs` is at the length gate.
 pub mod pool;
 
-pub use crate::pool::{PeakRecordingPool, WorkingSet};
+pub use crate::pool::WorkingSet;
 
 use crate::collect::{cell, outputs};
 use crate::translate::{bucket_expression, column, key_counts, measure_expression, predicate, table_reference};
@@ -354,18 +352,15 @@ impl DataFusionWarehouse {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|cause| DataFusionError::Runtime { cause })?;
-        let (environment, _) = pool::environment(working_set)?;
-        Ok(Self {
+        let environment = pool::environment(working_set)?;
+        Ok(Self::from_bounded(
             source,
             posture,
-            // `new_with_config_rt` rather than `new`, which is the whole of the bound: `new` installs
-            // an `UnboundedMemoryPool`. The config half is the engine's own default here, because a
-            // current-thread runtime has no width to pin - see `with_worker_threads` for the site
-            // where it does.
-            context: SessionContext::new_with_config_rt(SessionConfig::new(), environment),
-            runtime: Some(runtime),
             working_set,
-        })
+            SessionConfig::new(),
+            environment,
+            runtime,
+        ))
     }
 
     /// The same adapter, `workers` threads wide.
@@ -408,32 +403,35 @@ impl DataFusionWarehouse {
             .thread_name("sutura-engine")
             .build()
             .map_err(|cause| DataFusionError::Runtime { cause })?;
-        let (environment, _) = pool::environment(working_set)?;
-        Ok(Self {
+        let environment = pool::environment(working_set)?;
+        Ok(Self::from_bounded(
             source,
             posture,
-            // `new_with_config_rt` and NOT `new_with_config`: the second takes the default
-            // environment, which carries the engine's unbounded pool. **`with_target_partitions` is
-            // untouched** - `width_tests.rs` asserts both halves of this line, and a partition count
-            // that stops following the width silently builds sixteen-way plans on a two-worker
-            // runtime.
-            context: SessionContext::new_with_config_rt(SessionConfig::new().with_target_partitions(workers.get()), environment),
-            runtime: Some(runtime),
             working_set,
-        })
+            // The partition count follows the width. `width_tests.rs` asserts both halves.
+            SessionConfig::new().with_target_partitions(workers.get()),
+            environment,
+            runtime,
+        ))
     }
 
-    pub(crate) fn from_parts(
+    /// Builds the session from a bounded environment minted by [`pool`].
+    ///
+    /// The environment's field is private to that module, so even this crate cannot hand an
+    /// arbitrary `RuntimeEnv` to `SessionContext`. The measurement feature supplies a recorder
+    /// wrapped around the same greedy ceiling; it does not introduce an unbounded construction path.
+    pub(crate) fn from_bounded(
         source: SourceName,
         posture: SourcePosture,
         working_set: WorkingSet,
-        environment: Arc<RuntimeEnv>,
+        config: SessionConfig,
+        environment: pool::Bounded,
         runtime: tokio::runtime::Runtime,
     ) -> Self {
         Self {
             source,
             posture,
-            context: SessionContext::new_with_config_rt(SessionConfig::new(), environment),
+            context: SessionContext::new_with_config_rt(config, environment.into_runtime()),
             runtime: Some(runtime),
             working_set,
         }

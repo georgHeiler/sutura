@@ -222,8 +222,8 @@ ci:
 measure-bounds:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "measure-bounds: scope sutura-app differential bounds - exact 80-record fresh-child census; RSS is a post-setup HWM delta. Wider coverage is in `just test`."
-    python3 nix/measure-bounds.py 80 cargo test -p sutura-app --test differential federated::bounds::every_corpus_question_has_one_fresh_child_outcome_in_each_topology -- --exact --nocapture
+    echo 'measure-bounds: scope sutura-app differential bounds - derived fresh-child census; RSS is the child HWM including setup. Wider coverage is in `just test`.'
+    python3 nix/measure-bounds.py cargo nextest run -p sutura-app --all-features --test differential -E 'test(federated::bounds::every_corpus_question_has_one_fresh_child_outcome_in_each_topology)' --no-capture
 
 # The fat-LTO build. Opt-in, never automatic: minutes of build time for throughput nobody
 # has measured yet.
