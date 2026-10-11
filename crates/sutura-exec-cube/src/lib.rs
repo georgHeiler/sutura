@@ -166,7 +166,7 @@ where
         let token = match *presented {
             Presented::SharedServiceUser { .. } => &self.token,
             Presented::SubjectToken { ref material } => material,
-            Presented::SubjectPrincipal { .. } => {
+            Presented::SubjectPrincipal { .. } | Presented::SubjectSignIn { .. } => {
                 return Err(CubeError::Undeliverable {
                     at: String::from(self.source.as_str()),
                     presented: presented.as_str(),

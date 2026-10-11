@@ -67,7 +67,8 @@ pub use assertion_digest::AssertionDigest;
 
 /// A name a data system knows a principal by.
 ///
-/// The one a session is switched to ([`Presented::SubjectPrincipal`]).
+/// The one a session is switched to ([`Presented::SubjectPrincipal`]), or signed in as
+/// ([`Presented::SubjectSignIn`]).
 ///
 /// **Not a [`Secret`], and that is a statement rather than an omission.** A role or user
 /// name is not secret: the trust on that leg belongs to the connection the deployment
@@ -235,14 +236,14 @@ impl Expiry {
 
 /// What an adapter presents, for one leg.
 ///
-/// **Three shapes over two postures: impersonation at the source arrives by two mechanisms, and the
-/// shared shape is not the absence of the other two.** The engine that ships cannot impersonate
+/// **Four shapes over two postures: impersonation at the source arrives by three mechanisms, and the
+/// shared shape is not the absence of the other three.** The engine that ships cannot impersonate
 /// anybody - one process, one operating-system identity - so under a two-variant shape it would
 /// receive a value it ignores,
 /// and "the service-identity fallback was removed" would mean the fallback came back as a variant
-/// nobody looked at. Under three there is nothing to ignore: the shared leg's value holds no
+/// nobody looked at. Under four there is nothing to ignore: the shared leg's value holds no
 /// credential material, so an adapter cannot mistake it for one, and a reader of this enum can see
-/// that a third shape exists without reading an adapter.
+/// that the shared shape exists without reading an adapter.
 ///
 /// An adapter matches exhaustively on what it received and returns its own typed error for a shape
 /// it is not configured for. `docs/adr/0008` part 4 states both directions and says which is the
@@ -263,6 +264,14 @@ pub enum Presented {
     /// by a different mechanism. Its own variant so that the weaker trust is a shape a reader can
     /// see, never a field on the stronger one.
     SubjectPrincipal { name: PrincipalName },
+    /// The principal a source signs the asker in as, and the token that proves it: a credential the
+    /// asker's own assertion was exchanged for, beside the name it is presented under.
+    ///
+    /// Also `ImpersonationAtSource`, by a third mechanism - the source authenticates each request as
+    /// the named user rather than switching on the deployment's connection. Its own variant, and
+    /// not a field on [`Self::SubjectToken`], so that an adapter that has nowhere to name a user
+    /// cannot receive a name it would drop.
+    SubjectSignIn { name: PrincipalName, material: Secret },
     /// **No credential for the asker exists on this leg, and that is what this variant says out
     /// loud.**
     ///
@@ -283,6 +292,7 @@ impl Presented {
         match *self {
             Self::SubjectToken { .. } => "the asker's own credential",
             Self::SubjectPrincipal { .. } => "a principal to switch to as the asker",
+            Self::SubjectSignIn { .. } => "a principal to sign in as, with the asker's own credential",
             Self::SharedServiceUser { .. } => "the deployment's own identity for this source",
         }
     }
@@ -312,7 +322,10 @@ impl Presented {
     /// presented shape is a compile error here rather than a case that falls through to `Ok`.
     pub fn agrees_with(&self, posture: &SourcePosture, at: &SourceName) -> Result<(), PresentedDisagreesWithPosture> {
         match (self, posture) {
-            (Self::SubjectToken { .. } | Self::SubjectPrincipal { .. }, SourcePosture::ImpersonationAtSource) => Ok(()),
+            (
+                Self::SubjectToken { .. } | Self::SubjectPrincipal { .. } | Self::SubjectSignIn { .. },
+                SourcePosture::ImpersonationAtSource,
+            ) => Ok(()),
             (Self::SharedServiceUser { declared }, SourcePosture::SharedServiceUser { declared: mine }) => {
                 if declared == mine {
                     Ok(())
@@ -320,7 +333,10 @@ impl Presented {
                     Err(PresentedDisagreesWithPosture::WitnessIsNotThisSources { at: at.clone() })
                 }
             }
-            (Self::SubjectToken { .. } | Self::SubjectPrincipal { .. }, SourcePosture::SharedServiceUser { .. })
+            (
+                Self::SubjectToken { .. } | Self::SubjectPrincipal { .. } | Self::SubjectSignIn { .. },
+                SourcePosture::SharedServiceUser { .. },
+            )
             | (Self::SharedServiceUser { .. }, SourcePosture::ImpersonationAtSource) => {
                 Err(PresentedDisagreesWithPosture::ShapeIsNotThePosture {
                     at: at.clone(),

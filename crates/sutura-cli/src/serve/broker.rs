@@ -4,7 +4,7 @@
 //!
 //! The whole file is behind the three impersonating adapters' features in `serve.rs`'s
 //! `mod broker;`, and the `workload_identity` half behind `bigquery` alone. `delegation` composes
-//! the one exchange client, `sutura_http_client::delegation`, for a `bigquery` or `oracle` source.
+//! the one exchange client, `sutura_http_client::delegation`, for a `bigquery`, `clickhouse` or `oracle` source.
 //!
 //! **This replaces the exchanging broker's builder rather than restoring it.** That one wired
 //! `StsOverHttp` and `IamCredentialsOverHttp`, both deleted with the `wire` transport, so it has no
@@ -35,8 +35,6 @@ use sutura_domain::source::SourcePosture;
 /// Startup refusals, and each exists because the alternative is a deployment that boots clean and
 /// refuses every impersonated question:
 ///
-/// - a switching source whose declaration names nobody, so no caller could ever
-///   be served there;
 /// - a source declaring the pool expectations `telekom/sutura#817` added, which described a token
 ///   exchange no transport in this build performs;
 /// - a declared `delegation` whose endpoint, client ID, audience or client secret file this
@@ -44,10 +42,10 @@ use sutura_domain::source::SourcePosture;
 pub(crate) fn build_broker(
     registry: &sutura_config::SourceRegistry,
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "oracle", feature = "cube")),
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "cube", feature = "oracle")),
         expect(
             unused_variables,
-            reason = "only a `bigquery`, `oracle` or `cube` source composes a delegation over it"
+            reason = "only a `bigquery`, `clickhouse`, `cube` or `oracle` source composes a delegation over it"
         )
     )]
     outbound: Option<&sutura_tls::Declared>,
@@ -58,8 +56,15 @@ pub(crate) fn build_broker(
             broker = broker.shared(alias.clone(), declared.clone());
         }
         #[cfg(feature = "clickhouse")]
-        if let Some(declared) = crate::clickhouse::declared_principals(alias, source)? {
-            broker = broker.switching(alias.clone(), declared);
+        if let Some(deployment) = crate::clickhouse::deployment_user(alias, source)? {
+            broker = match crate::clickhouse::declared_delegation(source) {
+                [first, then @ ..] => broker.signing_in(
+                    alias.clone(),
+                    deployment,
+                    delegation(&format!("sources.{alias}.delegation"), first, then, outbound)?,
+                ),
+                [] => broker.switching(alias.clone(), deployment),
+            };
         }
         #[cfg(feature = "oracle")]
         if let [first, then @ ..] = crate::oracle::declared_delegation(source) {
@@ -133,7 +138,7 @@ fn federating(
 ///
 /// One agent per source rather than one per deployment: nothing here is shared that would need
 /// to be, and a second declared source pays one more TLS agent.
-#[cfg(any(feature = "bigquery", feature = "oracle", feature = "cube"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "cube", feature = "oracle"))]
 fn delegation(
     key: &str,
     first: &sutura_config::sources::workload_identity::DelegationDeclared,
@@ -175,11 +180,11 @@ fn delegation(
         })
 }
 
-#[cfg(any(feature = "bigquery", feature = "oracle", feature = "cube"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "cube", feature = "oracle"))]
 /// How long one exchange may take. Fixed rather than declared: it runs inside a question's own
 /// request timeout, so a key for it would be a second bound on the same wait.
 const EXCHANGE_TIMEOUT_SECONDS: u64 = 10;
 
-#[cfg(any(feature = "bigquery", feature = "oracle", feature = "cube"))]
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "cube", feature = "oracle"))]
 /// A token response is a few kilobytes; this bounds a misbehaving endpoint, not a real answer.
 const EXCHANGE_MAX_ANSWER_BYTES: u64 = 64 * 1024;

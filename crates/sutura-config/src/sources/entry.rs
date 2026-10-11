@@ -35,15 +35,14 @@ pub(super) fn parse_placement(
     if kind != SourceKind::Duckdb {
         refuse_foreign_keys(alias, kind, [("database_file", written(entry.database_file))])?;
     }
-    // `clickhouse`'s subject map, refused on every other kind for the same reason.
-    if kind != SourceKind::ClickHouse {
-        refuse_foreign_keys(alias, kind, [("impersonate", entry.impersonate.is_some())])?;
-    }
-    // The removed allow-list, on every kind; and the exchange `oracle` and `cube` read, on every other one.
+    // The two removed caller lists, on every kind; and the exchange on every kind but `oracle`, `clickhouse` and `cube`.
     if entry.subjects {
         return Err(InvalidSourceRegistry::SubjectsRemoved { alias: alias.clone() });
     }
-    if !matches!(kind, SourceKind::Oracle | SourceKind::Cube) {
+    if entry.impersonate {
+        return Err(InvalidSourceRegistry::ImpersonateRemoved { alias: alias.clone() });
+    }
+    if !matches!(kind, SourceKind::Oracle | SourceKind::ClickHouse | SourceKind::Cube) {
         refuse_foreign_keys(alias, kind, [("delegation", entry.delegation.is_some())])?;
     }
     cube::refuse_elsewhere(alias, kind, entry, written)?;
@@ -309,12 +308,7 @@ pub(super) fn parse_delegation(
     if let Some(cause) = channel_refusal {
         return Err(invalid(cause));
     }
-    let hops = declared
-        .iter()
-        .map(|hop| DelegationDeclared::of(alias, hop, "delegation.token_endpoint", "delegation.client_secret_file"))
-        .collect::<Result<Vec<_>, _>>()?;
-    super::workload_identity::refuse_broker_token_last(alias, "delegation", hops.last().map(DelegationDeclared::grant))?;
-    Ok(hops)
+    super::workload_identity::source_hops(alias, declared)
 }
 
 /// Refuses the first key in `keys` this entry wrote, naming it and the kind it does not belong to.

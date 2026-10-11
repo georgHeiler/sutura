@@ -128,9 +128,7 @@ pub use crate::catalog::{
     DocumentationSchema, InvalidCatalogSettings, InvalidConnection, InvalidDocumentationSchema, InvalidRdbmsCatalog,
     LiveRowPredicate, OracleCatalogConnection, PostgresCatalogConnection, PredicateOperator, RdbmsSettings, UnknownCatalogKind,
 };
-pub use crate::credentials::declared::{
-    DeclaredPrincipalBroker, DeclaredPrincipals, DeclaredPrincipalsUnusable, NoDeclaredPrincipals,
-};
+pub use crate::credentials::declared::{DeclaredPrincipalBroker, DeclaredPrincipalsUnusable};
 pub use crate::credentials::{StaticCredentialBroker, StaticCredentialsUnusable};
 pub use crate::environment::{Environment, UnknownEnvironment};
 pub use crate::governance::SpendBudget;

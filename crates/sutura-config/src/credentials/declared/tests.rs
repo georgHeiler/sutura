@@ -1,15 +1,13 @@
 //! `DeclaredPrincipalBroker`'s own suite. A child module of `principal`, so every private item that
 //! file declares is reachable through `super::`.
 
-use std::collections::BTreeMap;
-
 use sutura_domain::identity::{
-    CredentialBroker as _, Minted, Presented, PrincipalChain, PrincipalName, RequestContext, SourceSet, Subject, SubjectKey,
+    CredentialBroker as _, Minted, Presented, PrincipalChain, PrincipalName, RequestContext, SourceSet, Subject,
 };
 use sutura_domain::model::SourceName;
 use sutura_domain::source::{AcknowledgementReason, SharedIdentityDeclared};
 
-use super::{DeclaredPrincipalBroker, DeclaredPrincipals, NoDeclaredPrincipals};
+use super::DeclaredPrincipalBroker;
 
 /// The instant every agreement below is measured against: 2096-10-02.
 ///
@@ -60,10 +58,6 @@ fn no_assertion(raw: &str) -> RequestContext {
 /// A request with no caller identity at all - the deployment's own front door and nobody behind it.
 fn no_caller() -> RequestContext {
     RequestContext::of(PrincipalChain::of(Subject::TheDeploymentItself))
-}
-
-fn subject(raw: &str) -> SubjectKey {
-    SubjectKey::parse(raw).expect("a test subject key is a key")
 }
 
 fn principal(raw: &str) -> PrincipalName {
@@ -246,19 +240,6 @@ fn nothing_is_minted_for_a_plan_whose_second_source_cannot_be_served() {
 }
 
 #[test]
-fn a_declaration_naming_nobody_is_refused_at_parse_rather_than_per_request() {
-    // **The defect class this whole change removes, as a cell.** A switching source whose map is
-    // empty can serve no caller at all. If that were a value, the deployment would boot clean and
-    // refuse every question - so it is not a value: `DeclaredPrincipals::switched` refuses it, and
-    // the composition root turns that into a startup failure.
-    let refused = DeclaredPrincipals::switched(BTreeMap::new()).expect_err("an empty declaration names nobody");
-    assert_eq!(refused, NoDeclaredPrincipals::Empty);
-    let one = DeclaredPrincipals::switched(BTreeMap::from([(subject("analyst-a@example.com"), principal("analyst_a"))]))
-        .expect("a one-subject declaration names somebody");
-    assert_eq!(one.count(), 1);
-}
-
-#[test]
 fn an_empty_broker_can_serve_nothing() {
     // The default is *nothing declared*, and nothing declared refuses. A broker that widened an
     // unknown source into the deployment's own identity is the fallback the port exists to remove.
@@ -340,39 +321,36 @@ fn a_shared_only_plan_does_not_inherit_the_callers_own_deadline() {
 }
 
 fn switching() -> DeclaredPrincipalBroker {
-    let declared = DeclaredPrincipals::switched(BTreeMap::from([(subject("analyst-a@example.com"), principal("analyst_a"))]))
-        .expect("a one-subject declaration names somebody");
-    DeclaredPrincipalBroker::empty().switching(source("lakehouse"), declared)
+    DeclaredPrincipalBroker::empty().switching(source("lakehouse"), principal("sutura"))
 }
 
-/// A switching source is presented the declared principal itself - a value no pool has to verify,
-/// so a caller with no assertion is served - and the same map refuses everyone it does not name.
+/// A switching source is presented the caller's own verified subject, in full - a value no pool has
+/// to verify, so a caller with no assertion is served. Nobody, and the deployment's own user, is
+/// refused rather than switched to.
 #[test]
-fn a_switching_source_presents_the_declared_principal_and_refuses_an_undeclared_caller() {
+fn a_switching_source_presents_the_verified_subject_and_refuses_the_deployment_user() {
     let at = source("lakehouse");
     let asked = SourceSet::of(at.clone());
-    let minted = switching()
-        .mint(&no_assertion("analyst-a@example.com"), &asked)
-        .expect("a declared caller is minted for");
-    let credentials = granted(minted, "analyst-a@example.com", &asked);
-    assert!(
-        matches!(
-            credentials.presented_for(&at),
-            Ok(Presented::SubjectPrincipal { name }) if name.as_str() == "analyst_a"
-        ),
-        "the declared principal is presented"
-    );
-    for context in [caller("someone-else@example.com"), no_caller()] {
+    for asker in ["analyst-a@example.com", "someone-else@example.com"] {
+        let minted = switching()
+            .mint(&no_assertion(asker), &asked)
+            .expect("a verified caller is minted for");
+        let credentials = granted(minted, asker, &asked);
+        assert!(
+            matches!(
+                credentials.presented_for(&at),
+                Ok(Presented::SubjectPrincipal { name }) if name.as_str() == asker
+            ),
+            "{asker}: the verified subject itself is presented"
+        );
+    }
+    for context in [caller("sutura"), no_caller()] {
         let refused = switching().mint(&context, &asked).expect("a refusal, not an error");
         assert!(
             matches!(refused, Minted::Refused { ref source } if *source == at),
             "{refused:?}"
         );
     }
-    assert_eq!(
-        DeclaredPrincipals::switched(BTreeMap::new()),
-        Err(NoDeclaredPrincipals::Empty)
-    );
 }
 
 /// The same broker's `direct`-mode hook, against a fake identity provider.

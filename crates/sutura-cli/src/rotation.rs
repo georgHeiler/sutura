@@ -17,10 +17,11 @@
 /// still logged so a deployment can see why a one-shot did not start a poll.
 #[cfg(any(
     feature = "bigquery",
-    feature = "postgres",
+    feature = "clickhouse",
+    feature = "cube",
     feature = "datahub",
     feature = "openmetadata",
-    feature = "cube"
+    feature = "oracle"
 ))]
 pub(crate) fn drive_rotation<T, E>(source: &'static str, rotator: Option<sutura_tls::Rotator<T, E>>)
 where

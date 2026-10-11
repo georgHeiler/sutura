@@ -454,15 +454,16 @@ pub enum InvalidSourceRegistry {
         "`sources.{alias}` is `impersonation-at-source` and declares no `workload_identity` block - write the `audience` of the identity pool the asker's own assertion is exchanged against"
     )]
     MissingWorkloadIdentity { alias: SourceName },
-    /// A `clickhouse` source's `impersonate` map is not usable.
-    #[error("`sources.{alias}.impersonate` is not usable")]
-    Impersonate {
-        alias: SourceName,
-        #[source]
-        cause: crate::sources::placement::InvalidImpersonate,
-    },
-    /// An `oracle` or `cube` source's `delegation` is missing, misplaced, or declared over a
-    /// plaintext channel.
+    /// The removed `clickhouse` subject map: each caller runs as the `ClickHouse` user named by their
+    /// verified subject, so a configuration still declaring a map is refused rather than read as if it
+    /// still chose who runs as whom.
+    #[error(
+        "`sources.{alias}.impersonate` is removed: each verified caller runs as the ClickHouse user \
+         named by their verified subject - remove the key"
+    )]
+    ImpersonateRemoved { alias: SourceName },
+    /// An `oracle`, `clickhouse` or `cube` source's `delegation` is missing, misplaced, or declared
+    /// over a plaintext channel.
     #[error("`sources.{alias}.delegation` is not usable")]
     Delegation {
         alias: SourceName,
@@ -580,7 +581,8 @@ pub(crate) struct RawSourceEntry<'raw> {
     pub(crate) acknowledged_because: Option<&'raw str>,
     pub(crate) verification_identity: Option<&'raw str>,
     pub(crate) workload_identity: Option<crate::raw::RawWorkloadIdentity>,
-    pub(crate) impersonate: Option<&'raw std::collections::BTreeMap<String, String>>,
+    /// Whether the removed `impersonate` key is written - see [`InvalidSourceRegistry::ImpersonateRemoved`].
+    pub(crate) impersonate: bool,
     /// Whether the removed `subjects` key is written - see [`InvalidSourceRegistry::SubjectsRemoved`].
     pub(crate) subjects: bool,
     pub(crate) delegation: Option<&'raw [crate::raw::RawDelegation]>,
@@ -741,8 +743,8 @@ fn parse_entry(
     // impersonating shape, and only it. An impersonating entry must name the provider its
     // subject's credential is exchanged against; a non-impersonating entry may not carry one at all.
     let workload_identity = match entry.workload_identity.as_ref() {
-        // A `clickhouse` source declares its subject map as `impersonate`, an `oracle` source its
-        // `subjects` and a `cube` source its `delegation` instead - see their placements.
+        // A `clickhouse` source runs each caller as their verified subject; an `oracle` or `cube`
+        // source declares its `delegation` instead - see their placements.
         None if matches!(entry.posture.trim(), "impersonation-at-source")
             && !matches!(kind, SourceKind::ClickHouse | SourceKind::Oracle | SourceKind::Cube) =>
         {

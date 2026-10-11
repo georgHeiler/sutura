@@ -202,6 +202,7 @@ impl Warehouse for RecordsWhatItWasHanded {
         let material = match *presented {
             Presented::SubjectToken { ref material } => String::from(material.expose_secret()),
             Presented::SubjectPrincipal { ref name } => format!("principal:{name}"),
+            Presented::SubjectSignIn { ref name, ref material } => format!("{name}:{}", material.expose_secret()),
             Presented::SharedServiceUser { .. } => String::from("the deployment's own identity"),
         };
         drop(self.handed.send(material));

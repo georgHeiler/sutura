@@ -271,23 +271,14 @@ The configured word did not name a kind of catalog this build has.
 
 ## `use DeclaredPrincipalBroker`
 
-Presents the asking subject's own credential at a federating or authenticating source, the
-declared principal at a switching one - and the operator's witness for a shared one.
+Presents the asking subject's own credential at a federating or authenticating source, their
+verified name at a switching one - and the operator's witness for a shared one.
 
 **The credential is the verified assertion itself**, or, for a federating source declared with
 a `Delegation`, or any authenticating source, the token that delegation returned for that assertion.
 
 **All four maps, because one plan may read one of each and a broker is per answer rather than
 per source** - the reason the architecture decision gives for a broker being per answer at all.
-
-## `use DeclaredPrincipals`
-
-The subjects one switching source may be asked as, and the principal each of them becomes.
-
-**A parsed type and not a bare map, because the empty map is the interesting value.** A
-switching source with no declared subject can serve nobody: every request would be refused,
-while the boot log said the source opened. So the emptiness is refused at the boundary that can
-turn it into a startup failure.
 
 ## `use DeclaredPrincipalsUnusable`
 
@@ -297,10 +288,6 @@ Stated rather than unwrapped for `sutura_config::StaticCredentialsUnusable`'s re
 thing minting can fail on is a credential set that does not cover the sources it was asked
 about, and this broker builds its map from that same set. `unwrap_used` is denied and a panic
 here would be process death under `panic = "abort"` for a case a type already describes.
-
-## `use NoDeclaredPrincipals`
-
-Why a declared subject map or set is not one a source can be served under.
 
 ## `use StaticCredentialBroker`
 
@@ -2487,10 +2474,12 @@ the driver to federate against the pool this source declares. No socket and no c
 token service performs the exchange - but an EXPIRY, because credential material ages out.
 
 **A switching source is the second thing it presents** (`DeclaredPrincipalBroker::switching`):
-a declared subject-to-principal map, and the leg carries the declared principal alone, as
-`Presented::SubjectPrincipal`, for a source that authenticates the deployment and switches per
-statement - `ClickHouse`'s `EXECUTE AS`. No assertion is required there; leg 1's verified subject
-is the key, and an anonymous or undeclared caller is refused.
+no map - the leg carries the caller's own verified subject as `Presented::SubjectPrincipal`,
+for a source that authenticates the deployment and switches per statement - `ClickHouse`'s
+`EXECUTE AS`. No assertion is required there; an anonymous caller is refused, and so is one
+whose verified name IS the deployment's own user at that source. A source each caller signs in
+at (`DeclaredPrincipalBroker::signing_in`) is presented that name beside the token the
+delegation exchanges their assertion for, as `Presented::SubjectSignIn`.
 
 **An authenticating source is the third** (`DeclaredPrincipalBroker::authenticating`): the
 declared delegation exchanges the asker's assertion before the source opens the session with
@@ -2502,8 +2491,8 @@ the returned token and resolves who that is itself - Oracle's token authenticati
   attachment cannot read every row as the deployment.
 - **An anonymous caller, or one with no assertion, at a federating or authenticating source** - there is nothing
   for the pool to verify, and nothing to fall back to.
-- **A caller a switching source's declaration does not name** - refused, never
-  widened to a bare deployment identity.
+- **A caller whose verified name is the deployment's own user at a switching source** -
+  refused: switching to that user would answer as the deployment.
 
 # The limit, beside the claim
 
@@ -2511,73 +2500,6 @@ What a federated caller may read is decided by IAM grants this repository cannot
 lint, hook or gate here reads a live policy, and the driver's token fetch is lazy, so a pool that
 refuses the assertion or a principal with no grant surfaces on the FIRST QUESTION by that
 subject, never at boot.
-
-#### `enum NoDeclaredPrincipals`
-
-```rust
-pub enum NoDeclaredPrincipals
-```
-
-Why a declared subject map or set is not one a source can be served under.
-
-##### Variants
-
-- `Empty` - The declaration named no subject at all.
-
-##### Implements
-
-`Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
-
-#### `struct DeclaredPrincipals`
-
-```rust
-pub struct DeclaredPrincipals
-```
-
-The subjects one switching source may be asked as, and the principal each of them becomes.
-
-**A parsed type and not a bare map, because the empty map is the interesting value.** A
-switching source with no declared subject can serve nobody: every request would be refused,
-while the boot log said the source opened. So the emptiness is refused at the boundary that can
-turn it into a startup failure.
-
-##### Methods
-
-```rust
-pub fn count(&self) -> usize
-```
-
-How many subjects this source declares. Never zero.
-
-```rust
-pub fn switched(declared: BTreeMap<SubjectKey, PrincipalName>) -> Result<Self, NoDeclaredPrincipals>
-```
-
-Parses a declaration for a source that SWITCHES to the declared principal on the
-deployment's own connection - `DeclaredPrincipalBroker::switching`.
-
-**Keyed on the FULL verified subject and never on the masked
-`SubjectId`**: whether a caller may be served at this
-source at all is an authorization decision, and a masked key admits every undeclared caller
-that shares a declared subject's mask. Only emptiness is refused here: the crate that sends a
-value narrows it (`sutura_exec_clickhouse::execute_as::ClickHouseUser` for `EXECUTE AS`).
-
-# Errors
-
-`NoDeclaredPrincipals::Empty` for a declaration naming nobody.
-
-```rust
-pub fn target(&self, subject: &SubjectKey) -> Option<&PrincipalName>
-```
-
-The principal this source switches to for this subject, if it declares the subject at all.
-
-`None` is not a fallback - it is the answer for every caller a deployment did not name, and
-`DeclaredPrincipalBroker::mint` turns it into a refusal.
-
-##### Implements
-
-`Clone`, `Debug`, `Eq`, `PartialEq`
 
 #### `enum DeclaredPrincipalsUnusable`
 
@@ -2607,8 +2529,8 @@ here would be process death under `panic = "abort"` for a case a type already de
 pub struct DeclaredPrincipalBroker
 ```
 
-Presents the asking subject's own credential at a federating or authenticating source, the
-declared principal at a switching one - and the operator's witness for a shared one.
+Presents the asking subject's own credential at a federating or authenticating source, their
+verified name at a switching one - and the operator's witness for a shared one.
 
 **The credential is the verified assertion itself**, or, for a federating source declared with
 a `Delegation`, or any authenticating source, the token that delegation returned for that assertion.
@@ -2661,11 +2583,22 @@ pub fn shared(self, at: SourceName, declared: SharedIdentityDeclared) -> Self
 Declares one shared source and the operator's acknowledgement for it.
 
 ```rust
-pub fn switching(self, at: SourceName, declared: DeclaredPrincipals) -> Self
+pub fn signing_in(self, at: SourceName, deployment: PrincipalName, delegation: Delegation) -> Self
 ```
 
-Declares one impersonating source that switches to each declared subject's principal on the
-deployment's own connection - `ClickHouse`'s `EXECUTE AS`.
+Declares one impersonating source that each caller signs in at as the principal their
+verified subject names, with the token `delegation` exchanges their verified assertion for -
+never the assertion itself. A caller whose verified name is `deployment` is refused, as at a
+`Self::switching` source.
+
+```rust
+pub fn switching(self, at: SourceName, deployment: PrincipalName) -> Self
+```
+
+Declares one impersonating source that switches, on the deployment's own connection, to the
+principal named by each caller's verified subject - `ClickHouse`'s `EXECUTE AS`. `deployment`
+is the user that connection authenticates as: a caller whose verified name is that user is
+refused, since switching to it would answer as the deployment.
 
 ##### Implements
 
@@ -5758,8 +5691,8 @@ convenience, and nothing needs to clone a startup refusal.
   token is the caller's own pool principal, and the data system's grants on it decide what the
   caller may read. There is no `scope` key either: the credential document has no `scopes`
   member, so one would reach nothing.
-- `Impersonate` - A `clickhouse` source's `impersonate` map is not usable.
-- `Delegation` - An `oracle` or `cube` source's `delegation` is missing, misplaced, or declared over a plaintext channel.
+- `ImpersonateRemoved` - The removed `clickhouse` subject map: each caller runs as the `ClickHouse` user named by their verified subject, so a configuration still declaring a map is refused rather than read as if it still chose who runs as whom.
+- `Delegation` - An `oracle`, `clickhouse` or `cube` source's `delegation` is missing, misplaced, or declared over a plaintext channel.
 - `CubeEndpointCredentials` - A `cube` source's `endpoint` carries an `@`.
 - `SubjectsRemoved` - The removed `subjects` allow-list: sutura keeps no list of callers, so a configuration still declaring one is refused rather than read as if it still narrowed who is served.
 - `WorkloadIdentityNotImpersonating` - A workload-identity block was declared on a source that is not impersonating.
@@ -6321,7 +6254,7 @@ then on the variant is the answer.
 pub enum InvalidDelegation
 ```
 
-Why an `oracle` or `cube` source's `delegation` is not one it can be served under.
+Why an `oracle`, `clickhouse` or `cube` source's `delegation` is not one it can be served under.
 
 ##### Variants
 
@@ -6333,31 +6266,6 @@ Why an `oracle` or `cube` source's `delegation` is not one it can be served unde
 ##### Implements
 
 `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
-
-#### `enum InvalidImpersonate`
-
-```rust
-pub enum InvalidImpersonate
-```
-
-Why a `clickhouse` source's `impersonate` map is not one it can be served under.
-
-##### Variants
-
-- `Missing` - An impersonating source declared no subject, so no caller could ever be served there.
-- `NotImpersonating` - A map on a source that is not impersonating, which nothing would read.
-- `Subject`
-- `DuplicateSubject` - Two keys that parse to one subject - the parse trims, so they differ only in whitespace.
-- `EmptyUser`
-- `ServiceUser` - A declared user that is the source's own `user`.
-
-##### Implements
-
-`Debug`, `Display`, `Eq`, `Error`, `PartialEq`
-
-#### `type_alias DeclaredUsers`
-
-A `clickhouse` source's declared subject -> `ClickHouse` user map.
 
 ### Module `transport`
 
