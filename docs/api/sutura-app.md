@@ -77,7 +77,8 @@ boundary gate bans `anyhow` for, arrived at by a different route.
   that would not build - this workspace's own wiring, which no caller caused and none can fix.
 - `Miswired` - The federated path's own wiring produced a shape it cannot answer for.
 
-  Every arm is unreachable through the one production splitter - see `FederationMiswired`.
+  Every arm is unreachable through the production splitter and combiner - see
+  `FederationMiswired`.
 - `Broker` - The credential broker could not mint. Nothing about the question was wrong.
 
   **Its own variant rather than a refusal, and its own variant rather than sharing the one
@@ -144,12 +145,13 @@ boundary gate bans `anyhow` for, arrived at by a different route.
 pub enum FederationMiswired
 ```
 
-The federated path's own wiring, in the three shapes it cannot answer for.
+The federated path's own wiring, in the four shapes it cannot answer for.
 
 **Every arm is unreachable through `sutura_semantic::plan::federated_plan`, the one production
-splitter, and each is typed anyway rather than assumed away.** A previous revision reached for
-a `DuplicateLabels` combine failure for the first of them - a failure about a leg RESULT, minted
-from a value that has nothing to do with one - which is the shape this enum replaces.
+splitter, and the provided `FederationCombiner::execute`. Each is typed anyway rather than
+assumed away.** A previous revision reached for a `DuplicateLabels` combine failure for the
+first of them - a failure about a leg RESULT, minted from a value that has nothing to do with
+one - which is the shape this enum replaces.
 
 ### Variants
 
@@ -160,6 +162,10 @@ from a value that has nothing to do with one - which is the shape this enum repl
 
   `FederatedPlan::legs` returns the fact leg and the lookup leg by construction, so a pair
   built from it is one of each.
+- `LegNotGivenOut` - A leg was run that is not among the cut's own legs: one that already ran, or one the cut never held.
+
+  The cut's legs are `Cut::legs`, each yielded once, so a leg
+  outside that sequence is a wiring defect and names its source in `at`.
 - `RankedAnswer` - Ranking a combined answer produced a row set whose rows contradict its own columns.
 
   `FederatedPlan::rank` re-orders and truncates rows it was handed, so it cannot change a
