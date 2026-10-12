@@ -188,4 +188,33 @@ mod declared_principal {
             );
         }
     }
+
+    /// **A hosted cell refuses outside CI**, offline: a child of this binary runs the first hosted cell
+    /// with every variable set to a fake and `GITHUB_ACTIONS` absent, and must stop at the first read with
+    /// the rule's message. **The limit:** the fakes name nothing, so without the guard the child runs on
+    /// to a failure of its own, and it is the rule's message that is then absent.
+    #[test]
+    fn a_declared_principal_cell_is_refused_outside_ci() {
+        let output = std::process::Command::new(std::env::current_exe().expect("the test executable is known"))
+            .args([
+                "--ignored",
+                "--exact",
+                "declared_principal::each_subject_executes_as_its_own_principal_at_the_declared_pool",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("SUTURA_BQ_PROJECT", "no-such-project")
+            .env("SUTURA_BQ_DATASET", "no_such_dataset")
+            .env("SUTURA_BQ_AUDIENCE", "no-such-audience")
+            .env("SUTURA_BQ_ASSERTION_A", "no-such-assertion-a")
+            .env("SUTURA_BQ_ASSERTION_B", "no-such-assertion-b")
+            .env("SUTURA_BIGQUERY_ADBC_DRIVER", "/nonexistent/libadbc_driver_bigquery.so")
+            .output()
+            .expect("a child of the test binary starts");
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && said.contains("a live bigquery cell runs only in CI (GITHUB_ACTIONS=true)"),
+            "the child must stop at the first read with the CI rule, and said:\n{said}"
+        );
+    }
 }
