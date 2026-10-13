@@ -214,21 +214,20 @@ pub enum NotFitToServe {
         /// `workload_identity.delegation` on `bigquery`, `delegation` on `oracle`.
         key: &'static str,
     },
-    /// The raw SQL tool is enabled in a deployment that declared it serves more than one subject.
+    /// The raw SQL tool is enabled in `multi-user` mode and no source is an acknowledged
+    /// `shared-service-user`.
     ///
-    /// **The same "same reason, same mechanism" the shared-source check already uses, over a
-    /// sharper capability.** `docs/adr/0013` requires the raw tool available only where the source
-    /// executes as the asking subject, or the deployment is single-user - and today no linked
-    /// adapter accepts a raw statement AND carries a per-subject credential, so this refuses
-    /// unconditionally on the declared mode rather than asking a composition root about an adapter
-    /// capability that cannot yet make the answer `no`. **The limit, stated with the claim:** this
-    /// is a boot-time refusal over a declared mode, not a runtime check that a caller's identity
-    /// actually varies - `single-user` is still a word an operator writes.
+    /// Reads configuration only: whether some source is an acknowledged `shared-service-user`
+    /// source, whose `acknowledged_because` says why every caller may read what that one account
+    /// reads. Whether a raw statement runs is decided per call in the composed binary: it runs only
+    /// when exactly one data system is open and that system accepts raw statements, and otherwise
+    /// the call is refused.
     #[error(
-        "tools.run_sql.enabled is true and {key} is `multi-user`. The raw SQL tool executes under \
-         one shared identity for every caller - see docs/adr/0013 - so it may run only where the \
-         deployment is single-user or a source executes as the asking subject. Neither holds here: \
-         set tools.run_sql.enabled to false, or declare {key} as single-user with a written reason",
+        "tools.run_sql.enabled is true, {key} is `multi-user`, and no source is an acknowledged \
+         `shared-service-user`. The raw SQL tool runs only over a shared source whose \
+         `sources.<alias>.acknowledged_because` is set - every caller can then read what the shared \
+         account can read. Set tools.run_sql.enabled to false, acknowledge a shared source, or \
+         declare {key} as single-user with a written reason",
         key = DeploymentIdentity::KEY
     )]
     RunSqlEnabledInMultiUserMode,
