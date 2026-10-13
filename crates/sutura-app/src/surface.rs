@@ -115,7 +115,7 @@ pub trait Surface: Send + Sync + 'static {
     /// Replaces the served bundle with a freshly loaded one, or says why it did not.
     ///
     /// A bundle with the digest already served, over the schema set already served, is
-    /// [`Adopted::Unchanged`] and costs one schema read. A bundle with a new digest is held to what
+    /// [`Adopted::Unchanged`]. A bundle with a new digest is held to what
     /// boot holds the first one to - every anchor, every declared key, and the deployment's own
     /// pre-flight - and only a bundle that passed all of it is stored, **whole**. The served bundle
     /// over a new schema set is held to every anchor and every declared key, but not to the
@@ -603,8 +603,8 @@ where
         if bundle_changed && let Some(gate) = &self.adoption_gate {
             gate(&next, &self.warehouses).map_err(|cause| NotAdopted::Preflight { cause })?;
         }
-        // Read at every refresh, because the snapshot key is both digests: an unchanged bundle over
-        // a changed source keeps its `DefinitionDigest`.
+        // The snapshot key is both digests; the schema set derives from the bundle's own column
+        // types, so a bundle that changes only a type still rotates it.
         let schemas = pin_schemas(&next, &self.warehouses).map_err(|cause| NotAdopted::NotValidated { cause })?;
         if !bundle_changed && schemas.digest() == current.schemas().digest() {
             return Ok(Adopted::Unchanged);
