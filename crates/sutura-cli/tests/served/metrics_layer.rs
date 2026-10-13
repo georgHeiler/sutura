@@ -14,11 +14,12 @@
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
     use std::io::{ErrorKind, Read as _};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use sutura_catalog_datahub::test_support::{DEPLOYMENT_PROPERTY, FakeServer, happy_path_answers};
     use sutura_http_client::tls_test_support::{issue, server_config};
@@ -85,6 +86,78 @@ mod tests {
                 ("password", name),
             ],
         )
+    }
+
+    /// Cube's access policy reads `regions` as a list, so a token without it, or with it as a single
+    /// value, fails here naming only the claim keys it carries. The decoder's own errors are not
+    /// printed, so no byte of the token reaches a message.
+    fn assert_carries_regions(token: &str) {
+        let payload = token.split('.').nth(1).expect("an access token is a compact JWT");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap_or_else(|_| panic!("a token payload is base64url"));
+        let claims: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| panic!("a token payload is a JSON object"));
+        assert!(
+            claims.get("regions").is_some_and(serde_json::Value::is_array),
+            "the deployment's token carries no `regions` list (absent or not a list); its claim keys: {:?}",
+            claims.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// The anchored question's shape, asked of `cube-metrics` directly.
+    const PROBE: &str = r#"{"query":{"measures":["orders.revenue"],"timeDimensions":[{"dimension":"orders.order_date","granularity":"month","dateRange":["2026-06-01","2026-06-30"]}]}}"#;
+
+    /// Waits until `cube-metrics` lists the `orders` model and answers one `/load` for `deployment`.
+    /// Docker's healthy is `/readyz` only, and this tier's first request is this case's own start, so
+    /// the deployment's start must not be what finds the model, the realm keys or the warehouse
+    /// unready. It asks Cube itself, past the TLS front and the deployment, and gives up loudly with
+    /// the last answer. The deployment's own requests are never retried: a refusal after this is the
+    /// case's to fail on.
+    fn await_cube(cube: &str, deployment: &str) {
+        let agent = sutura_http_client::agent(|config| {
+            config
+                .timeout_global(Some(Duration::from_secs(10)))
+                .http_status_as_error(false)
+        });
+        let authorization = format!("Bearer {deployment}");
+        let read = |sent: Result<ureq::http::Response<ureq::Body>, ureq::Error>| match sent {
+            Ok(mut response) => (
+                response.status().as_u16(),
+                response.body_mut().read_to_string().unwrap_or_default(),
+            ),
+            Err(cause) => (0, cause.to_string()),
+        };
+        let give_up = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (status, body) = read(
+                agent
+                    .get(&format!("http://{cube}/cubejs-api/v1/meta"))
+                    .header("authorization", &authorization)
+                    .call(),
+            );
+            let listed = status == 200 && body.contains("\"name\":\"orders\"");
+            let (status, body) = if listed {
+                read(
+                    agent
+                        .post(&format!("http://{cube}/cubejs-api/v1/load"))
+                        .header("authorization", &authorization)
+                        .header("content-type", "application/json")
+                        .send(PROBE),
+                )
+            } else {
+                (status, body)
+            };
+            if listed && status == 200 && !body.contains("Continue wait") {
+                return;
+            }
+            assert!(
+                Instant::now() < give_up,
+                "cube-metrics was not ready after about a minute (orders listed: {listed}); last answer {status}: {}",
+                body.chars().take(300).collect::<String>()
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     /// Accepts on loopback with a leaf this run issued and forwards each connection to `upstream`.
@@ -166,8 +239,11 @@ mod tests {
                 ("client_secret", DEPLOYMENT_SECRET),
             ],
         );
+        assert_carries_regions(&deployment);
+        let cube = tier("cube-metrics");
+        await_cube(&cube, &deployment);
         let ca = files.0.join("cube-ca.pem");
-        let front = tls_front(tier("cube-metrics"), &ca);
+        let front = tls_front(cube, &ca);
         let replaced = [
             (PORT, String::from("port: 0")),
             (KEY_SET_FILE, file("jwks.json", &key_set)),
