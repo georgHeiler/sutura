@@ -343,6 +343,22 @@ site is a type error - the same reason a `SourceName` and a `SourceName` neighbo
 as two bare `String`s elsewhere in this workspace. `Copy`, like every other bound in this crate:
 it is read once at boot and carried by value from there.
 
+## `use ClientId`
+
+A client id exactly as written: 1 to 128 letters, digits, `-`, `.` or `_`.
+
+## `use ExtraScopeClaims`
+
+Which claims beside `scope` grant scopes in `direct`: Entra's `scp` for a delegated token and
+`roles` for an app-only one. A closed set, and empty unless the deployment names it.
+
+## `use GrantedScopes`
+
+The scopes a `behind-gateway` assertion carries when it has no `scope` claim.
+
+Every subject the transit issuer signs for this audience without a `scope` gets them, so they are
+printed at start-up. An assertion that states a `scope`, an empty one included, gets only that.
+
 ## `use InboundIdentity`
 
 How the identity of a caller reaches this deployment. Printed at startup, per deployment.
@@ -463,6 +479,10 @@ A signature algorithm this deployment will accept.
 classic direct-validation defect and it is silent when it works: a token signed with `HS256`
 using the issuer's *public* key as the HMAC secret verifies, if the validator will accept a
 symmetric algorithm. There is no variant here that could.
+
+## `use TokenAudience`
+
+What `aud` must equal: an `https` URI, a client id, or - behind a gateway - an absolute path.
 
 ## `use TokenLocation`
 
@@ -2970,13 +2990,19 @@ holds an asserted identity. See this module's documentation for why.
 #### Methods
 
 ```rust
+pub fn granting_when_absent(self, grant: GrantedScopes) -> Self
+```
+
+The same declaration, granting `grant` to an assertion that carries no `scope` claim.
+
+```rust
 pub const fn header(&self) -> &ProofHeader
 ```
 
 The header the proof arrives in.
 
 ```rust
-pub const fn new(header: ProofHeader, issuer: IssuerUrl, audience: ResourceIdentifier, key_set: KeySetFile, algorithms: PinnedAlgorithms, token_type: RequiredTokenType, max_lifetime: ProofLifetime) -> Self
+pub const fn new(header: ProofHeader, issuer: IssuerUrl, audience: TokenAudience, key_set: KeySetFile, algorithms: PinnedAlgorithms, token_type: RequiredTokenType, max_lifetime: ProofLifetime) -> Self
 ```
 
 Assembles a declaration from parts that have each already been parsed.
@@ -3112,7 +3138,7 @@ pub const fn algorithms(&self) -> &'inbound PinnedAlgorithms
 The algorithms this deployment will accept - never the one in the token's own header.
 
 ```rust
-pub const fn audience(&self) -> &'inbound ResourceIdentifier
+pub const fn audience(&self) -> &'inbound TokenAudience
 ```
 
 The value the `aud` claim must contain, byte for byte.
@@ -3121,6 +3147,18 @@ The value the `aud` claim must contain, byte for byte.
 resource indicator asking its authorization server for a narrower token; that is welcome and
 it is an optimisation. It is never what makes the token safe, and this check is not skippable
 when the indicator is absent.
+
+```rust
+pub const fn extra_scope_claims(&self) -> ExtraScopeClaims
+```
+
+Which claims beside `scope` grant scopes.
+
+```rust
+pub const fn grant(&self) -> Option<&'inbound GrantedScopes>
+```
+
+What a token with no `scope` claim is granted - never added to one that has a `scope`.
 
 ```rust
 pub const fn issuer(&self) -> &'inbound IssuerUrl
@@ -3147,6 +3185,13 @@ pub const fn max_lifetime(&self) -> Option<ProofLifetime>
 The ceiling on `exp - iat`, where this deployment puts one. See the field.
 
 ```rust
+pub const fn resource(&self) -> Option<&'inbound ResourceIdentifier>
+```
+
+The identifier RFC 9728's metadata and a challenge name, whatever `aud` is. `None` behind a
+gateway, which publishes none.
+
+```rust
 pub const fn token_type(&self) -> &'inbound RequiredTokenType
 ```
 
@@ -3155,6 +3200,14 @@ Which class of token, out of the `typ` header, checked after the signature verif
 #### Implements
 
 `Clone`, `Copy`, `Debug`, `Eq`, `PartialEq`
+
+### `use ClientId`
+
+A client id exactly as written: 1 to 128 letters, digits, `-`, `.` or `_`.
+
+### `use TokenAudience`
+
+What `aud` must equal: an `https` URI, a client id, or - behind a gateway - an absolute path.
 
 ### `use InvalidAlgorithms`
 
@@ -3277,6 +3330,18 @@ Case is folded and a leading `application/` is stripped, both at construction. R
 treating them as three would refuse tokens that are correct. This is deliberately the opposite
 decision from `ResourceIdentifier`, where nothing is normalised: an audience is an opaque string
 an operator and an issuer configured identically, and a media type is a value a registry defines.
+
+### `use ExtraScopeClaims`
+
+Which claims beside `scope` grant scopes in `direct`: Entra's `scp` for a delegated token and
+`roles` for an app-only one. A closed set, and empty unless the deployment names it.
+
+### `use GrantedScopes`
+
+The scopes a `behind-gateway` assertion carries when it has no `scope` claim.
+
+Every subject the transit issuer signs for this audience without a `scope` gets them, so they are
+printed at start-up. An assertion that states a `scope`, an empty one included, gets only that.
 
 ## Module `limits`
 

@@ -869,6 +869,9 @@ fn nothing_in_this_module_is_sendable_by_accident() {
 /// are the ones a reviewer should be able to find, run and delete-if-wrong as a group.
 mod review;
 
+/// An `aud` other than the resource identifier, and the scopes an Entra token grants through it.
+#[cfg(test)]
+mod audience;
 /// Leg 1 against an issuer that PUBLISHES its key set, so the rotation bound faces a source that changes.
 mod published;
 /// Where a refresh runs, what bounds it, and what the revocation bound does not cover - the cases

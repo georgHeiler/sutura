@@ -320,8 +320,22 @@ fn announce_identity(settings: &Settings) {
                 "PER-CALLER IDENTITY IS ESTABLISHED; SOURCE ACCESS DEPENDS ON ITS DECLARED POSTURE"
             );
             announce_token_class(inbound);
+            announce_grant(inbound);
         }
     }
+}
+
+/// The line a deployment that grants scopes by configuration must not be able to miss: every
+/// scopeless assertion its gateway signs is granted them, whoever the subject is.
+fn announce_grant(inbound: &InboundIdentity) {
+    let Some(grant) = inbound.requirement().grant() else {
+        return;
+    };
+    tracing::warn!(
+        granted_scopes = %grant,
+        "SCOPES ARE GRANTED BY CONFIGURATION: every assertion with no `scope` claim is granted these, \
+         whoever its subject is. An assertion that states a `scope` is granted only that"
+    );
 }
 
 /// The line a deployment that switched off the token-class check must not be able to miss.

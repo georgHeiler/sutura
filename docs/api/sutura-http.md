@@ -1338,6 +1338,7 @@ Why a scope string is not one.
   The position and never the value, like every other refusal in this crate: a scope is caller
   text, and the character classes that matter most here - a control character, an invisible one -
   are exactly the ones that would print as nothing.
+- `NotAScopeClaim` - An extra scope claim that is neither a string nor an array of strings.
 
 ##### Implements
 
@@ -2401,6 +2402,8 @@ and an error is not a place for credential material.
   A separate refusal from an expiry, because it says something different: a proof issued in the
   future is a clock that disagrees or a claim somebody wrote, and either way the lifetime bound
   above cannot be trusted to mean what it says.
+- `ClientNotNamed` - With `extra_scope_claims` set, a token whose `azp` is absent or is not a client id.
+- `ClientIsTheApi` - With `extra_scope_claims` set, a token whose `azp` is this deployment's own audience: the client must differ from the API.
 
 ##### Implements
 
@@ -2471,7 +2474,7 @@ differently, and every field on it is a control.
 ##### Methods
 
 ```rust
-pub const fn audience(&self) -> &ResourceIdentifier
+pub const fn audience(&self) -> &TokenAudience
 ```
 
 The audience this validator requires, for a challenge and for a log line.

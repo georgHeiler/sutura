@@ -11,7 +11,8 @@ use crate::inbound::keys::{InvalidKeySet, KeySet};
 use crate::inbound::token::TokenRejected;
 use crate::testing::{ISSUER, KID, RESOURCE};
 
-use super::fixtures::{bearer, claims, direct, gate_over, jwks, key_pair, signed};
+use super::audience::{CLIENT_ID, entra_declared};
+use super::fixtures::{bearer, claims, direct, gate_over, jwks, key_pair, signed, signed_as};
 
 // --------------------------------------------- TokenRejected through establish ----
 
@@ -192,6 +193,84 @@ async fn a_token_naming_an_empty_key_id_is_refused_with_unusable_key_id() {
     assert!(
         matches!(rejected, TokenRejected::UnusableKeyId { .. }),
         "expected UnusableKeyId, got {rejected:?}"
+    );
+}
+
+/// A `typ: JWT` token for [`CLIENT_ID`] with `extra` claims, through a deployment that reads `roles`.
+async fn established_reading_roles(extra: &str) -> Result<crate::inbound::VerifiedCaller, TokenRejected> {
+    let pair = key_pair();
+    let settings = entra_declared(&format!(
+        "    audience: \"{CLIENT_ID}\"\n    extra_scope_claims: [\"roles\"]\n"
+    ));
+    let gate = gate_over(settings.security().inbound().expect("an inbound identity"), &jwks(KID, &pair));
+    let token = signed_as(
+        &pair,
+        KID,
+        &claims("someone@example.com", CLIENT_ID, ISSUER, extra),
+        Some("JWT"),
+    );
+    gate.establish(&bearer(&token), Instant::now()).await
+}
+
+/// With `extra_scope_claims` set, a token that names no client in `azp` is refused with
+/// [`TokenRejected::ClientNotNamed`], asserted through its message.
+#[tokio::test]
+async fn a_token_naming_no_client_is_refused_where_extra_scope_claims_are_read() {
+    let rejected = established_reading_roles(
+        r#"{"ver":"2.0","preferred_username":"user@example.com","roles":["sutura:catalog.read","sutura:metrics.ask","sutura:sql.run"]}"#,
+    )
+    .await
+    .expect_err("a token naming no client grants nothing");
+    assert_eq!(rejected.to_string(), "the presented token names no client in `azp`");
+}
+
+/// With `extra_scope_claims` set, a token whose client is the API itself is refused with
+/// [`TokenRejected::ClientIsTheApi`], asserted through its message.
+#[tokio::test]
+async fn a_token_whose_client_is_the_api_is_refused_where_extra_scope_claims_are_read() {
+    let rejected = established_reading_roles(&format!(
+        r#"{{"azp":"{CLIENT_ID}","ver":"2.0","roles":["sutura:catalog.read"]}}"#
+    ))
+    .await
+    .expect_err("a token whose client is the API grants nothing");
+    assert_eq!(
+        rejected.to_string(),
+        "the presented token names this deployment's own audience as its client"
+    );
+}
+
+/// With `extra_scope_claims` set, an empty `azp` names no client.
+#[tokio::test]
+async fn an_empty_client_is_refused_where_extra_scope_claims_are_read() {
+    let rejected = established_reading_roles(r#"{"azp":"","ver":"2.0","roles":["sutura:catalog.read"]}"#)
+        .await
+        .expect_err("an empty client grants nothing");
+    assert_eq!(rejected.to_string(), "the presented token names no client in `azp`");
+}
+
+/// With `extra_scope_claims` set, an `azp` with whitespace around it is not a client id.
+#[tokio::test]
+async fn the_api_id_with_whitespace_around_it_is_refused_where_extra_scope_claims_are_read() {
+    let rejected = established_reading_roles(&format!(
+        r#"{{"azp":" {CLIENT_ID}\t","ver":"2.0","roles":["sutura:catalog.read"]}}"#
+    ))
+    .await
+    .expect_err("a padded client grants nothing");
+    assert_eq!(rejected.to_string(), "the presented token names no client in `azp`");
+}
+
+/// With `extra_scope_claims` set, the API's own id in another case is still the API.
+#[tokio::test]
+async fn the_api_id_in_another_case_is_refused_where_extra_scope_claims_are_read() {
+    let rejected = established_reading_roles(&format!(
+        r#"{{"azp":"{}","ver":"2.0","roles":["sutura:catalog.read"]}}"#,
+        CLIENT_ID.to_uppercase()
+    ))
+    .await
+    .expect_err("the API in another case grants nothing");
+    assert_eq!(
+        rejected.to_string(),
+        "the presented token names this deployment's own audience as its client"
     );
 }
 
