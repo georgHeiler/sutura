@@ -1016,8 +1016,9 @@ An overstated claim is itself the defect, so each of these is written down here 
    beside the claim.
 3. **Binding a gateway assertion to a request.** Added by review: in the `behind-gateway` mode the
    replay *window* is bounded - an `iat` is required and `exp - iat` is capped by a value this
-   deployment chose - and inside that window an intercepted assertion replays. There is no nonce
-   store and nothing hashes a method, a path or a body into the assertion. That is why nothing here
+   deployment chose - and inside that window an intercepted assertion replays, unless
+   `transit_single_use` is declared, which refuses a second presentation per process. Nothing
+   hashes a method, a path or a body into the assertion. That is why nothing here
    calls it a proof that *this request* transited anything, and why the hop between the component
    and this process is a trusted transport boundary rather than an incidental one.
 
@@ -1650,7 +1651,8 @@ gateway assertion is minted by the component, not by an authorization server a c
 that mode offers no Bearer challenge - wherever the assertion arrives.
 
 An unknown key id while the key source is down is `503 identity_unavailable` instead, with no
-challenge: the token may be fine, and the outage is this deployment's.
+challenge: the token may be fine, and the outage is this deployment's. So is a new assertion while
+the store of seen assertions is full, where single use is declared.
 
 What the response does **not** say is which check failed. The log says - through the `#[source]`
 chain on `TokenRejected` - and the caller does not, because "the signature verified and the
@@ -2465,6 +2467,10 @@ and an error is not a place for credential material.
   above cannot be trusted to mean what it says.
 - `ClientNotNamed` - With `extra_scope_claims` set, a token whose `azp` is absent or is not a client id.
 - `ClientIsTheApi` - With `extra_scope_claims` set, a token whose `azp` is this deployment's own audience: the client must differ from the API.
+- `NoAssertionId` - Behind a gateway that declares single use, an assertion with no `jti` - the architecture decision.
+- `UnusableAssertionId` - Behind a gateway that declares single use, a `jti` that is not a string of 1 to `limit` bytes. The value is never rendered.
+- `Replayed` - The `jti` was admitted before and its assertion has not expired. The value is never rendered.
+- `SeenStoreFull` - Every place in the store of seen assertions is held by an unexpired one. A `503`, not a `401`: nothing is wrong with the caller's assertion, and none is admitted unrecorded.
 
 ##### Implements
 
