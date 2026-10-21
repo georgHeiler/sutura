@@ -7351,6 +7351,21 @@ two.
 
 One metric's share of a drill-across question.
 
+### `use ArmLegs`
+
+One arm's leg results, in the shape its `Arm` takes.
+
+The variant is the arm's, so a joined arm's two legs cannot be handed over as a local arm's one.
+A local arm's result is tagged with the metric of the fact leg it came from, because two local arms'
+results share a shape and a swap would answer one metric's number under the other's name. Whether
+the variants line up with the plan's arms, and whether a local arm's metric is the arm's own, is
+the combiner's to check: a slice cannot say. A joined arm's `Legs` carry a side and not a metric, so
+two joined arms' results are not told apart here.
+
+### `use DrillAcrossCombiner`
+
+Joins every arm of a `DrillAcrossPlan` on the answer's keys and time bucket.
+
 ### `use DrillAcrossPlan`
 
 Two or more `Arm`s that share one set of keys, one bucket grain and one time range.
@@ -8551,6 +8566,21 @@ Why a drill-across plan, or one of its arms, could not be built.
 ##### Implements
 
 `Clone`, `Debug`, `Display`, `Eq`, `Error`, `PartialEq`
+
+#### `use ArmLegs`
+
+One arm's leg results, in the shape its `Arm` takes.
+
+The variant is the arm's, so a joined arm's two legs cannot be handed over as a local arm's one.
+A local arm's result is tagged with the metric of the fact leg it came from, because two local arms'
+results share a shape and a swap would answer one metric's number under the other's name. Whether
+the variants line up with the plan's arms, and whether a local arm's metric is the arm's own, is
+the combiner's to check: a slice cannot say. A joined arm's `Legs` carry a side and not a metric, so
+two joined arms' results are not told apart here.
+
+#### `use DrillAcrossCombiner`
+
+Joins every arm of a `DrillAcrossPlan` on the answer's keys and time bucket.
 
 #### `constant MAX_LEGS`
 
