@@ -1,5 +1,5 @@
 diff --git a/xtask/src/inconclusive.rs b/xtask/src/inconclusive.rs
-index 182418f62..9e84b9cad 100644
+index 2c0ba7e92..20e42036f 100644
 --- a/xtask/src/inconclusive.rs
 +++ b/xtask/src/inconclusive.rs
 @@ -236,7 +236,7 @@ fn sources(root: &Path) -> Option<Vec<Source>> {
@@ -9,5 +9,18 @@ index 182418f62..9e84b9cad 100644
 -    for path in in_scope_dir(&root.join("nix"))? {
 +    for path in in_scope_dir(&root.join("nix")).unwrap_or_default() {
          if path.extension().and_then(|e| e.to_str()) != Some("nix") {
+             continue;
+         }
+diff --git a/xtask/src/workflows/sources.rs b/xtask/src/workflows/sources.rs
+index a97f22cd9..974a183a5 100644
+--- a/xtask/src/workflows/sources.rs
++++ b/xtask/src/workflows/sources.rs
+@@ -142,7 +142,7 @@ fn collect(root: &Path) -> Result<Vec<Source>, String> {
+         }
+     }
+ 
+-    for path in in_scope_dir(&root.join("nix"))? {
++    for path in in_scope_dir(&root.join("nix")).unwrap_or_default() {
+         if path.extension().and_then(|e| e.to_str()) != Some("sh") {
              continue;
          }
