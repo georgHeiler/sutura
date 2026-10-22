@@ -1,0 +1,13 @@
+diff --git a/xtask/src/inconclusive.rs b/xtask/src/inconclusive.rs
+index 182418f62..9e84b9cad 100644
+--- a/xtask/src/inconclusive.rs
++++ b/xtask/src/inconclusive.rs
+@@ -236,7 +236,7 @@ fn sources(root: &Path) -> Option<Vec<Source>> {
+ /// breaking, as it is for the files `sources` names one by one.
+ fn nix_sources(root: &Path) -> Result<Vec<Source>, String> {
+     let mut out = Vec::new();
+-    for path in in_scope_dir(&root.join("nix"))? {
++    for path in in_scope_dir(&root.join("nix")).unwrap_or_default() {
+         if path.extension().and_then(|e| e.to_str()) != Some("nix") {
+             continue;
+         }
