@@ -297,7 +297,7 @@ shape and no differential executed it. Both now exist, and each carries its own 
 
 **What is still not claimed.** Every leg runs under one operating-system identity. Both facts sit
 on one source, because the plan stage still refuses a second fact on another source
-(`CrossModelRatioSpansSources`). The one-source catalog refuses the
+(`CrossModelRatioSpansSources`; lifted by the seventh amendment). The one-source catalog refuses the
 question (`CrossModelRatioWithoutSharedDimension`), so there is no whole-answer side to compare a
 two-fact answer against, and the cell measures that refusal rather than stating it.
 
@@ -370,6 +370,35 @@ timestamp calendar loads, and one spelling that two systems mean differently pas
 on a source no fact of the metric lives on is not refused: it decides no answer. Only the local catalog
 reads `shared_calendar:`; every other catalog keeps the no-calendar refusal. Nothing here executes a
 two-source ratio: no cell in this change runs one, and the plan stage still refuses it.
+
+## Seventh amendment, 2026-10-23: a second fact on another data system is served
+
+`telekom/sutura#1471`. The sixth amendment declared one calendar per source and left the plan stage
+refusing a second fact off the metric's own source. That refusal, `CrossModelRatioSpansSources`, is
+deleted, and the wire code `cross_model_ratio_spans_sources` no longer exists, which is a breaking
+change. The decision stays: each fact leg is one statement and a statement reads one source.
+
+- **What the plan does.** The second fact leg is its own statement on its own source. It joins the
+  calendar the metric lists on that source (`CrossModel::second_calendar`), and buckets and bounds
+  the range on that table. The plan's bucket is the first fact's. `FederatedPlan::new` holds the
+  second fact's bucket to the plan's **label and grain**, and no longer to its column: each calendar
+  is its own table. A bucket at another grain is still `BucketMismatch`.
+- **The sources.** Every leg's source counts against the deployment's source ceiling, so a second
+  fact on a third data system is a third source (`PlanSpansTooManySources` above the ceiling). The
+  answer path already reads `FederatedPlan::legs`, so one lookup, one credential mint over every
+  distinct source, one pre-flight and one charge cover the second fact.
+- **The cells.** `a_second_fact_on_another_source_joins_the_calendar_listed_there` and
+  `a_second_fact_on_a_third_source_counts_against_the_source_ceiling` hold the plan;
+  `a_second_fact_on_another_system_answers_through_the_calendar_listed_there` answers the shape on
+  two in-process engines, held to the same hand-worked figures as the one-system shape.
+
+**The limits next to the claims.** The two calendars are trusted to hold the same rows; sutura cannot
+check it, and two that differ bucket the legs differently with no refusal. A date calendar beside a
+timestamp calendar loads (sixth amendment), and the two-fact combine does not compare the two buckets'
+kinds, so the join's own typing decides what happens and no cell measures it. The differential asks two in-process engines only: no tiered data system runs a second fact off the
+metric's source, so the shape is unmeasured on a real warehouse. A metric's required filters still
+bind the first fact alone. **Superseded:** the second, third and sixth amendments' statements that a
+second fact on another source is refused at plan time.
 
 ## What does not change
 

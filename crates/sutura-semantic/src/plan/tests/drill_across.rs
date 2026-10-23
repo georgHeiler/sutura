@@ -90,6 +90,7 @@ fn a_cross_model_ratio_beside_another_metric_is_an_arm_with_its_second_fact() {
             cross: Some(CrossModel {
                 second: &visits,
                 calendar: &calendar,
+                second_calendar: &calendar,
                 own_to_calendar: &facts_calendar,
                 second_to_calendar: &visits_calendar,
                 second_relationships: vec![&visits_customer],
