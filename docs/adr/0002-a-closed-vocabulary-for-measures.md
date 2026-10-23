@@ -399,16 +399,20 @@ change. The decision stays: each fact leg is one statement and a statement reads
   source. Above the source ceiling it is refused as `plan_spans_too_many_sources` (409). Nothing
   answers `cross_model_ratio_spans_sources` any more.
 
+- **The buckets' kinds.** The two-fact join compares the Arrow kinds of the two buckets, as the
+  multi-metric merge does, and refuses a difference (a date calendar beside a timestamp one, which
+  loads under the sixth amendment) as `BucketKindMismatch`, answered as
+  `federated_answer_not_well_formed`, before any join is built. Its cell is
+  `a_second_fact_bucketed_as_another_kind_is_refused`.
+
 **The limits next to the claims.** The two calendars are trusted to hold the same rows; sutura cannot
-check it, and two that differ bucket the legs differently with no refusal. A date calendar beside a
-timestamp calendar loads (sixth amendment). The multi-metric merge refuses buckets of different
-kinds (`BucketKindMismatch`); the two-fact join does not compare them, it only checks that the second
-leg projects the bucket, so the join's own typing decides what happens and no cell measures it. The
-two-fact join meets buckets from two tables here for the first time, so that check is missing in one
-of the two joins (`telekom/sutura#1581`). The differential asks two in-process engines only: no tiered data system runs a
-second fact off the metric's source, so the shape is unmeasured on a real warehouse. A metric's required filters still
-bind the first fact alone. **Superseded:** the second, third and sixth amendments' statements that a
-second fact on another source is refused at plan time.
+check it, and two that differ bucket the legs differently with no refusal. The kind check reads the
+types the legs return and no value, and its cell hands the combiner an integer bucket beside a text
+one: no run answers it end to end with a timestamp calendar. The differential asks two in-process
+engines only: no tiered data system runs a second fact off the metric's source, so the shape is
+unmeasured on a real warehouse. A metric's required filters still bind the first fact alone.
+**Superseded:** the second, third and sixth amendments' statements that a second fact on another
+source is refused at plan time.
 
 ## What does not change
 
