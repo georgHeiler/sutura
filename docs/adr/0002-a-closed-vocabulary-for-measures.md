@@ -206,7 +206,8 @@ the metric's own and refused every such ratio under one name
 *which column buckets the second fact?* Four shapes were on the table; the owner's call is **(B)
 a shared calendar** - a conformed time dimension both fact models reach through a declared `via`,
 so both facts bucket through the SAME calendar column rather than each keeping its own notion of
-"the" time column. Refusing forever was explicitly not the accepted outcome of that question -
+"the" time column (**superseded by the seventh amendment**: the same time column, read from the
+calendar table listed on each fact's own source). Refusing forever was explicitly not the accepted outcome of that question -
 this amendment builds toward the chosen shape rather than leaving it undocumented.
 
 The amendment is one more field, again on the metric rather than on the term: `shared_calendar:
@@ -381,8 +382,9 @@ change. The decision stays: each fact leg is one statement and a statement reads
 - **What the plan does.** The second fact leg is its own statement on its own source. It joins the
   calendar the metric lists on that source (`CrossModel::second_calendar`), and buckets and bounds
   the range on that table. The plan's bucket is the first fact's. `FederatedPlan::new` holds the
-  second fact's bucket to the plan's **label and grain**, and no longer to its column: each calendar
-  is its own table. A bucket at another grain is still `BucketMismatch`.
+  second fact's bucket to the plan's **label, grain and time column name**, and no longer to its
+  calendar table: each calendar is its own table. A bucket at another grain, or on another time
+  column, is still `BucketMismatch`.
 - **The sources.** Every leg's source counts against the deployment's source ceiling, so a second
   fact on a third data system is a third source (`PlanSpansTooManySources` above the ceiling). The
   answer path already reads `FederatedPlan::legs`, so one lookup, one credential mint over every
@@ -390,13 +392,21 @@ change. The decision stays: each fact leg is one statement and a statement reads
 - **The cells.** `a_second_fact_on_another_source_joins_the_calendar_listed_there` and
   `a_second_fact_on_a_third_source_counts_against_the_source_ceiling` hold the plan;
   `a_second_fact_on_another_system_answers_through_the_calendar_listed_there` answers the shape on
-  two in-process engines, held to the same hand-worked figures as the one-system shape.
+  two in-process engines, held to the rows the same engines give with the tickets on the first
+  system, which `two_fact.rs` holds to hand-worked figures.
+- **What a client sees.** The question is served. With no dimension on a remote model it is refused
+  as `cross_model_ratio_without_shared_dimension` (422), as before for a second fact on the first
+  source. Above the source ceiling it is refused as `plan_spans_too_many_sources` (409). Nothing
+  answers `cross_model_ratio_spans_sources` any more.
 
 **The limits next to the claims.** The two calendars are trusted to hold the same rows; sutura cannot
 check it, and two that differ bucket the legs differently with no refusal. A date calendar beside a
-timestamp calendar loads (sixth amendment), and the two-fact combine does not compare the two buckets'
-kinds, so the join's own typing decides what happens and no cell measures it. The differential asks two in-process engines only: no tiered data system runs a second fact off the
-metric's source, so the shape is unmeasured on a real warehouse. A metric's required filters still
+timestamp calendar loads (sixth amendment). The multi-metric merge refuses buckets of different
+kinds (`BucketKindMismatch`); the two-fact join does not compare them, it only checks that the second
+leg projects the bucket, so the join's own typing decides what happens and no cell measures it. The
+two-fact join meets buckets from two tables here for the first time, so that check is missing in one
+of the two joins (`telekom/sutura#1581`). The differential asks two in-process engines only: no tiered data system runs a
+second fact off the metric's source, so the shape is unmeasured on a real warehouse. A metric's required filters still
 bind the first fact alone. **Superseded:** the second, third and sixth amendments' statements that a
 second fact on another source is refused at plan time.
 

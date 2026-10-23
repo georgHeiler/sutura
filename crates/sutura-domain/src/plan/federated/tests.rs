@@ -293,9 +293,9 @@ fn a_second_fact_on_the_first_fact_s_source_constructs() {
 }
 
 /// A second fact on another data system buckets through the calendar listed on that system, so its
-/// bucket column is its own table's. D9 holds the bucket's label and grain, though: a second fact
+/// bucket column is its own table's. D9 holds the bucket's label, grain and time column, though: a second fact
 /// grouped at another grain is refused, so the combiner's join on the bucket label can only ever
-/// compare periods of one length.
+/// compare periods of one length - and of one time column.
 #[test]
 fn a_second_fact_bucketed_through_its_own_calendar_constructs_at_the_plan_s_grain_only() {
     let federation = || Federation::of(&Measure::Simple(term(Aggregate::Sum, "mrr_cents")));
@@ -315,6 +315,16 @@ fn a_second_fact_bucketed_through_its_own_calendar_constructs_at_the_plan_s_grai
     assert!(
         matches!(coarser, Err(FederatedPlanError::BucketMismatch)),
         "a second fact bucketed at another grain is not a plan, got {coarser:?}"
+    );
+    let other_column = PlanBucket::new(
+        ResultLabel::bucket(),
+        Grain::Month,
+        PlanColumn::new(table("dim_orders"), column("day")),
+    );
+    let elsewhere = two_fact_plan(federation(), second_fact_on(SECOND_FACT_SOURCE, other_column));
+    assert!(
+        matches!(elsewhere, Err(FederatedPlanError::BucketMismatch)),
+        "a second fact bucketed on another time column is not a plan, got {elsewhere:?}"
     );
 }
 
