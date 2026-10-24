@@ -32,6 +32,16 @@
       "sha256": "add9d9e876d9ac1625ef9b8a92393a4cbcd0988874863e630b81b9a8c7b10bb0"
     },
     {
+      "name": "security-audit",
+      "catalog": "active",
+      "status": "adapted",
+      "local_path": "skills/security/security-audit",
+      "repo": "https://github.com/cloudflare/security-audit-skill",
+      "ref": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+      "upstream_path": "skills/security-audit",
+      "sha256": "5d62547e2bd05d21ed43d9dc9b01460883b9330c9b84e124c41daf6a1b784244"
+    },
+    {
       "name": "api-and-interface-design",
       "catalog": "library",
       "status": "mirror",
