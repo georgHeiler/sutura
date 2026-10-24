@@ -498,6 +498,13 @@ mod tests {
         // the formatting rules must not touch it. Without this the vendored mimalloc tree
         // reported 343 findings that were every one of them upstream's own whitespace.
         let vendored = "vendor/mimalloc_rust/libmimalloc-sys/c_src/mimalloc/v3/src/alloc/alloc.c";
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../")
+                .join(vendored)
+                .exists(),
+            "the anchor must name a file in the vendored tree"
+        );
         let messy = "int a;  \nint b;\n\n\n";
         assert_eq!(inspect(vendored, messy), vec![], "formatting is upstream's business");
         assert_eq!(fixed(vendored, messy), messy, "`--fix` returns vendored bytes unchanged");
