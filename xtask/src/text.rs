@@ -497,7 +497,7 @@ mod tests {
         // `vendor/**` holds upstream bytes recorded in VENDOR.md against a release hash, so
         // the formatting rules must not touch it. Without this the vendored mimalloc tree
         // reported 343 findings that were every one of them upstream's own whitespace.
-        let vendored = "vendor/mimalloc_rust/libmimalloc-sys/c_src/mimalloc/v3/src/alloc.c";
+        let vendored = "vendor/mimalloc_rust/libmimalloc-sys/c_src/mimalloc/v3/src/alloc/alloc.c";
         let messy = "int a;  \nint b;\n\n\n";
         assert_eq!(inspect(vendored, messy), vec![], "formatting is upstream's business");
         assert_eq!(fixed(vendored, messy), messy, "`--fix` returns vendored bytes unchanged");
