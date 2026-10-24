@@ -95,6 +95,15 @@ SOURCES: list[dict[str, str]] = [
         "status": "generated",
         "generator": "skills/engineering/ms-rust/generate.py",
     },
+    {
+        "name": "security-audit",
+        "repo": "https://github.com/cloudflare/security-audit-skill",
+        "ref": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+        "upstream_path": "skills/security-audit",
+        "local_path": "skills/security/security-audit",
+        "catalog": "active",
+        "status": "adapted",
+    },
 ]
 
 PROVENANCE = "## Provenance"

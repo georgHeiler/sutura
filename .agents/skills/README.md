@@ -30,6 +30,7 @@ are symlinks to `.agents/skills`. One canonical set, three products.
 | find out why something fails | `engineering/README.md` |
 | validate a token or authorize on claims | `engineering/README.md` |
 | obtain a token: flow, PKCE, storage, logout | `engineering/README.md` |
+| audit a codebase or investigate a security boundary | `security/README.md` |
 | split dependent changes into reviewable PRs | `git-ops/README.md` |
 | decide between approaches, or check my own reasoning | `reasoning/README.md` |
 
@@ -40,6 +41,7 @@ are symlinks to `.agents/skills`. One canonical set, three products.
 | `agent-system/` | How skills are discovered, imported and maintained. |
 | `sutura/` | This codebase's own reference: invariants, the query and tool surface, identity, the crate map, dependency currency, security reasoning, the gate map. |
 | `engineering/` | Rust in this workspace, debugging, and both halves of OAuth 2.x / OIDC. |
+| `security/` | Source-first security audits and bounded vulnerability validation. |
 | `git-ops/` | Stacked branches: dependent changes as separate reviewable PRs. |
 | `reasoning/` | Structured reasoning: making the argument explicit before acting on it. |
 
