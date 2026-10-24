@@ -879,6 +879,9 @@ mod gas_tests;
 mod moved_tests;
 
 #[cfg(test)]
+mod worktree_tests;
+
+#[cfg(test)]
 mod tests {
     use super::base::BaseOutcome;
     use super::fixtures::{Mutation, inseparable_claim_case};
