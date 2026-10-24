@@ -598,7 +598,13 @@ fn commit_added_tests(wt: &Path, commit: &str) -> Option<Vec<AddedTest>> {
     use crate::causality::plan::Plan;
     use crate::causality::scoped::Scan;
     let at = crate::causality::provenance::Commit::parse(commit)?;
-    let read = |path: &str| worktree::at_base(wt, &at, path);
+    let read = |path: &str| match worktree::at_base(wt, &at, path) {
+        Ok(text) => text,
+        Err(failed) => {
+            failed.refuse();
+            None
+        }
+    };
     let files: Vec<ChangedFile> = diff::commit_additions(wt, commit)
         .map_err(|e| eprintln!("xtask test-causality: FAILED - {e}"))
         .ok()?;

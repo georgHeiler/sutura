@@ -82,6 +82,7 @@
 //! on HEAD and red on base*. Because nextest fails when a filter matches nothing, a test this
 //! gate cannot name is a loud failure on the HEAD run rather than a quiet pass.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -414,9 +415,9 @@ const fn retry_with_held_back(outcome: &BaseOutcome, held: &BaseState<'_>) -> bo
 /// refusal, a source gone from disk) nor the call that hands its result to [`sources_under`]. Both
 /// read the real repository, and no cell injects a census.
 fn feature_activation(root: &Path, at: &Commit, files: &[diff::ChangedFile], read: &regions::PostImage<'_>) -> Activation {
-    let base = |path: &str| match worktree::base_has(root, at, path) {
-        Ok(true) => worktree::at_base(root, at, path).map_or(BaseText::Unreadable, BaseText::Text),
-        Ok(false) => BaseText::Absent,
+    let base = |path: &str| match worktree::at_base(root, at, path) {
+        Ok(Some(text)) => BaseText::Text(text),
+        Ok(None) => BaseText::Absent,
         Err(_) => BaseText::Unreadable,
     };
     let listing: std::cell::OnceCell<features::Listing> = std::cell::OnceCell::new();
@@ -615,7 +616,14 @@ pub(crate) fn run(args: &[String]) -> Verdict {
     // THE BASE IMAGE, because a REMOVED line exists in no other one. Two consumers: `reverted`
     // asks whether a reverted line sat inside a test region of the tree it restores, and
     // `relocation` asks the same of every line a declared cleanup took out.
-    let base_tree = |path: &str| worktree::at_base(&root, at, path);
+    let base_failure: RefCell<Option<GitFailed>> = RefCell::new(None);
+    let base_tree = |path: &str| match worktree::at_base(&root, at, path) {
+        Ok(text) => text,
+        Err(failed) => {
+            base_failure.replace(Some(failed));
+            None
+        }
+    };
 
     // A COMMIT MAY DECLARE ITSELF A TEST-FILE CLEANUP, and the trailer is a CLAIM this CHECKS
     // rather than a permission that replaces the check - a trailer nothing verifies is the gate
@@ -634,7 +642,7 @@ pub(crate) fn run(args: &[String]) -> Verdict {
     // GIT'S OWN PATH LIST IS A SECOND INPUT, and not a convenience: `files` is the POST-image's, so
     // a file this branch DELETED has no entry in it. Without the list a `git rm` of a test file
     // rides a claim that every changed line was accounted for, over lines nothing ever read.
-    match relocation::decide(
+    let relocation = relocation::decide(
         Claim::of(&range.messages.replace('\0', "\n")).as_ref(),
         &relocation::Changed {
             files: &files,
@@ -644,7 +652,12 @@ pub(crate) fn run(args: &[String]) -> Verdict {
             head: &working_tree,
             base: &base_tree,
         },
-    ) {
+    );
+    if let Some(failed) = base_failure.borrow_mut().take() {
+        failed.refuse();
+        return Verdict::Fail;
+    }
+    match relocation {
         Relocation::Unclaimed => {}
         Relocation::Pure { paths, exempt } => {
             return relocation::report_pure(&paths, &exempt, &Coverage::of(&[], &files, &working_tree));
@@ -656,6 +669,10 @@ pub(crate) fn run(args: &[String]) -> Verdict {
     // fully waived set therefore falls through to the plan the deletion check preempted, so a test
     // the same range adds is still proven.
     let (files, plan) = edited::moved::plan_carrying(files, &gone, &working_tree, &base_tree);
+    if let Some(failed) = base_failure.borrow_mut().take() {
+        failed.refuse();
+        return Verdict::Fail;
+    }
     let plan = match plan {
         Plan::DeletedTests(deleted) => {
             // A COMMIT MAY WAIVE A NAMED DELETION, and the trailer is a CLAIM this CHECKS against
@@ -663,7 +680,14 @@ pub(crate) fn run(args: &[String]) -> Verdict {
             // `Claim-Cell:` rather than a blanket override.
             let waived = weakens::Waived::of(&range.messages);
             match report_deleted_tests(&deleted, &waived) {
-                Verdict::Pass => edited::callsite::separate(&files, &working_tree, &base_tree),
+                Verdict::Pass => {
+                    let plan = edited::callsite::separate(&files, &working_tree, &base_tree);
+                    if let Some(failed) = base_failure.borrow_mut().take() {
+                        failed.refuse();
+                        return Verdict::Fail;
+                    }
+                    plan
+                }
                 refused => return refused,
             }
         }
@@ -731,6 +755,10 @@ pub(crate) fn run(args: &[String]) -> Verdict {
                 &live,
                 &range.messages,
             );
+            if let Some(failed) = base_failure.borrow_mut().take() {
+                failed.refuse();
+                return Verdict::Fail;
+            }
             edited::callsite::cap(&separable.edited, verdict)
         }
     }
