@@ -12,10 +12,9 @@
 //! [`search`], [`head_branch`], [`head_commit`], [`branch_metadata`], [`base_has`] and [`naming`]
 //! return raw output or [`GitFailed`] and decide nothing; `super::provenance`, `super::stack` and
 //! `super::features` parse them, so every classification they feed is testable without a
-//! repository. [`at_base`] is the exception: it returns `None` for a failed call as well as an
-//! absent one, as before. `feature_activation` pairs it with [`base_has`] and refuses `None` as
-//! unreadable. The other readers of the base image are not changed here and do not all refuse it:
-//! `deletion_in` does, while the rest read `None` as no text.
+//! repository. [`at_base`] keeps a failed call separate from an absent path, and its callers refuse
+//! the former rather than reading it as no text. The other readers of the base image are not
+//! changed here and do not all refuse it: `deletion_in` does, while the rest read `None` as no text.
 //! Two compositions are glue over those reads and still decide nothing: [`parent`] binds
 //! `super::stack::parent_of` to this repository, and [`already_there`] asks
 //! `super::provenance::Moved` about the base.
@@ -366,15 +365,13 @@ pub(super) fn base_has(root: &Path, base: &Commit, path: &str) -> Result<bool, G
 /// empty, while a manifest the base HAS and whose content did not come back leaves that scan with
 /// nothing to compare - and answering *nothing was enabled* there would be a claim about a table
 /// it never read. One reader, and the pairing is decided at the call site.
-pub(super) fn at_base(root: &Path, base: &Commit, path: &str) -> Option<String> {
-    let out = git(root)
-        .args(["show", &format!("{}:{path}", base.as_str())])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+pub(super) fn at_base(root: &Path, base: &Commit, path: &str) -> Result<Option<String>, GitFailed> {
+    if !base_has(root, base, path)? {
+        return Ok(None);
+    }
+    let mut command = git(root);
+    command.args(["show", &format!("{}:{path}", base.as_str())]);
+    stdout(command, false).map(Some)
 }
 
 /// Set up a detached worktree at HEAD under the given path.
