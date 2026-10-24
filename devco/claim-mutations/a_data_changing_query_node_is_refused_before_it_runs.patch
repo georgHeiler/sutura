@@ -1,0 +1,13 @@
+diff --git a/crates/sutura-exec-duckdb/src/screen.rs b/crates/sutura-exec-duckdb/src/screen.rs
+index 207cefec..570b798e 100644
+--- a/crates/sutura-exec-duckdb/src/screen.rs
++++ b/crates/sutura-exec-duckdb/src/screen.rs
+@@ -166,7 +166,7 @@ fn walked<'tree>(node: &'tree Value, ctes: &mut Vec<(&'tree str, Load)>) -> Resu
+         }
+     }
+     let kind = fields.get("type").and_then(Value::as_str);
+-    if let Some(node) = kind.filter(|kind| kind.ends_with("_NODE") && !READ_NODES.contains(kind)) {
++    if let Some(node) = kind.filter(|kind| kind.ends_with("_NODE") && false) {
+         return Err(NotARead::Node(node.to_owned()));
+     }
+     match kind {
