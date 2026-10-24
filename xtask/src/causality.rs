@@ -879,4 +879,7 @@ mod gas_tests;
 mod moved_tests;
 
 #[cfg(test)]
+mod worktree_tests;
+
+#[cfg(test)]
 mod tests;
