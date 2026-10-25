@@ -1,0 +1,14 @@
+diff --git a/crates/sutura-domain/src/warehouse/arrow.rs b/crates/sutura-domain/src/warehouse/arrow.rs
+--- a/crates/sutura-domain/src/warehouse/arrow.rs
++++ b/crates/sutura-domain/src/warehouse/arrow.rs
+@@ -431,7 +431,7 @@ fn mapped(label: &str, kind: &DataType) -> Result<(), UnreadableCell> {
+         | DataType::Decimal128(..)
+         | DataType::Decimal256(..) => Ok(()),
+-        ref other => Err(UnreadableCell::UnsupportedType {
++        ref other => Err(UnreadableCell::NotFinite {
+             column: String::from(label),
+-            arrow_type: format!("{other:?}"),
++            cause: crate::warehouse::cell::NotFinite::NotANumber,
+         }),
+     }
+ }

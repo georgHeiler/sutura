@@ -160,6 +160,9 @@ fn a_type_neither_adapter_maps_names_itself_rather_than_being_rendered() {
         "TIMESTAMP '2026-06-01 00:00:00'",
         "[1]",
         "NULL::TIMESTAMP",
+        // Untyped, it keeps the engine's own `NULL` type. The driver hands it over as Arrow `Null`,
+        // which the domain maps nowhere: refused by type, not answered as a null cell.
+        "NULL",
     ] {
         let refusal = refused(unmapped);
         assert!(
@@ -365,4 +368,23 @@ fn a_cte_map_of_another_shape_is_refused_unread() {
     let read =
         super::screen::screen(r#"{"error": false, "statements": [{"node": {"type": "SELECT_NODE", "cte_map": {"map": []}}}]}"#);
     assert!(read.is_ok(), "{read:?}");
+}
+
+#[test]
+fn a_data_changing_query_node_is_refused_before_it_runs() {
+    for node in [
+        "INSERT_QUERY_NODE",
+        "UPDATE_QUERY_NODE",
+        "DELETE_QUERY_NODE",
+        "COPY_QUERY_NODE",
+    ] {
+        let tree = format!(
+            r#"{{"error": false, "statements": [{{"node": {{"type": "SELECT_NODE", "child": {{"type": "{node}"}}}}}}]}}"#
+        );
+        let refused = super::screen::screen(&tree);
+        assert!(
+            matches!(refused, Err(super::NotARead::Node(ref name)) if name == node),
+            "{node}: {refused:?}"
+        );
+    }
 }
