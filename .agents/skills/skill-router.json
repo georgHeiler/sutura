@@ -34,6 +34,13 @@
         "oauth-flows": "engineering/oauth-flows/SKILL.md"
       }
     },
+    "security": {
+      "readme": "security/README.md",
+      "scope": "Source-first security audits and bounded vulnerability validation.",
+      "skills": {
+        "security-audit": "security/security-audit/SKILL.md"
+      }
+    },
     "git-ops": {
       "readme": "git-ops/README.md",
       "scope": "Stacked branches: dependent changes as separate reviewable PRs.",
@@ -65,6 +72,7 @@
     { "intent": "find out why something fails", "group": "engineering", "skill": "debugging" },
     { "intent": "validate an incoming token, or authorize on its claims", "group": "engineering", "skill": "oauth" },
     { "intent": "obtain a token: pick a flow, PKCE, storage, logout", "group": "engineering", "skill": "oauth-flows" },
+    { "intent": "audit a codebase or investigate a security boundary", "group": "security", "skill": "security-audit" },
     { "intent": "split dependent changes into reviewable PRs, or rebase a stack", "group": "git-ops", "skill": "stacked-branches" },
     { "intent": "decide between approaches, or check my own reasoning", "group": "reasoning", "skill": "autoreason" }
   ]

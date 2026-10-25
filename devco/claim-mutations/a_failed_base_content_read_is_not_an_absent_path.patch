@@ -1,0 +1,18 @@
+diff --git a/xtask/src/causality/worktree.rs b/xtask/src/causality/worktree.rs
+index 8ded466b..b5e0394d 100644
+--- a/xtask/src/causality/worktree.rs
++++ b/xtask/src/causality/worktree.rs
+@@ -366,12 +366,9 @@ pub(super) fn base_has(root: &Path, base: &Commit, path: &str) -> Result<bool, GitFailed> {
+ /// a manifest the base does not have is a NEW package and its base feature table is legitimately
+ /// empty, while a manifest the base HAS and whose content did not come back leaves that scan with
+ /// nothing to compare - and answering *nothing was enabled* there would be a claim about a table
+ /// it never read. One reader, and the pairing is decided at the call site.
+ pub(super) fn at_base(root: &Path, base: &Commit, path: &str) -> Result<Option<String>, GitFailed> {
+-    if !base_has(root, base, path)? {
+-        return Ok(None);
+-    }
+     let mut command = git(root);
+     command.args(["show", &format!("{}:{path}", base.as_str())]);
+-    stdout(command, false).map(Some)
++    Ok(command.output().ok().and_then(|out| out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())))
+ }
