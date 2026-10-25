@@ -174,13 +174,6 @@ pub enum RefusalReason {
     /// a duplicated dimension is: a caller who sent it twice believes something about the result
     /// that is not true.
     DuplicateMetricName { metric: MetricName },
-    /// A question named more than one metric and also asked for `top`.
-    ///
-    /// **`top` names no metric to rank by**, and the two rendering paths disagree about which
-    /// measure column it means once there is more than one: this workspace's own wiring, not a
-    /// caller-narrowable question. Refused by name, naming every metric asked, rather than ranking
-    /// by whichever measure a given adapter happens to read.
-    MultiMetricTopNotExecutable { metrics: Vec<MetricName> },
     /// The metric exists and does not declare that grain. Not a narrower question: a grain the
     /// author did not render is a number nobody certified.
     GrainNotSupported { metric: MetricName, grain: Grain },
@@ -697,12 +690,6 @@ mod tests {
             RefusalReason::QuestionNeedsTooManyLegs { legs: 8, limit: 6 },
             RefusalReason::DuplicateMetricName {
                 metric: MetricName::parse("revenue").expect("a test metric"),
-            },
-            RefusalReason::MultiMetricTopNotExecutable {
-                metrics: vec![
-                    MetricName::parse("revenue").expect("a test metric"),
-                    MetricName::parse("margin").expect("a test metric"),
-                ],
             },
             RefusalReason::GrainNotSupported {
                 metric: MetricName::parse("revenue").expect("a test metric"),

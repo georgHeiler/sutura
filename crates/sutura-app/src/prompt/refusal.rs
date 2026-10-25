@@ -67,12 +67,6 @@ const DUPLICATE_METRIC_NAME: Guide = Guide {
     remedy: "Send it once - refused rather than de-duplicated.",
 };
 
-const MULTI_METRIC_TOP_NOT_EXECUTABLE: Guide = Guide {
-    reason: "multi_metric_top_not_executable",
-    meaning: "`top` names no metric to rank by, and more than one was asked",
-    remedy: "Ask about one metric with `top`, or ask about several with no `top`.",
-};
-
 const GRAIN_NOT_SUPPORTED: Guide = Guide {
     reason: "grain_not_supported",
     meaning: "the metric exists and does not declare that time resolution",
@@ -325,7 +319,6 @@ pub(super) const GUIDES: &[&Guide] = &[
     &TOO_MANY_METRICS,
     &DIMENSION_NOT_CONFORMED,
     &DUPLICATE_METRIC_NAME,
-    &MULTI_METRIC_TOP_NOT_EXECUTABLE,
     &GRAIN_NOT_SUPPORTED,
     &DIMENSION_NOT_PERMITTED,
     &DIMENSION_NOT_FILTERABLE,
@@ -392,7 +385,6 @@ pub(super) const fn guide_for(reason: &RefusalReason) -> &'static Guide {
         RefusalReason::MetricUnknown { .. } => &METRIC_UNKNOWN,
         RefusalReason::TooManyMetrics { .. } => &TOO_MANY_METRICS,
         RefusalReason::DuplicateMetricName { .. } => &DUPLICATE_METRIC_NAME,
-        RefusalReason::MultiMetricTopNotExecutable { .. } => &MULTI_METRIC_TOP_NOT_EXECUTABLE,
         RefusalReason::GrainNotSupported { .. } => &GRAIN_NOT_SUPPORTED,
         RefusalReason::DimensionNotPermitted { .. } => &DIMENSION_NOT_PERMITTED,
         RefusalReason::DimensionNotConformed { .. } => &DIMENSION_NOT_CONFORMED,

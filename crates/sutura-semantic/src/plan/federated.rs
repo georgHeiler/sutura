@@ -42,6 +42,7 @@ pub(super) fn federated_plan(
     resolution: &Resolution<'_>,
     closed: &Measure,
     lookups: &Lookups<'_, '_>,
+    attach_top: bool,
 ) -> Result<FederatedPlan, PlanError> {
     let metric = resolution.metric;
     let model = resolution.model;
@@ -191,6 +192,9 @@ pub(super) fn federated_plan(
     // like the deployment simply not being able to execute a leg. `FederatedPlan::new`'s `?` above
     // leaves it as `PlanError::NotAssembled` now, keeping the typed cause, because a defect in our
     // own wiring is not a governance answer and a caller must not be handed one it could retry.
+    if !attach_top {
+        return Ok(plan);
+    }
     Ok(match resolution.top {
         Some(top) => plan.with_top(top),
         None => plan,

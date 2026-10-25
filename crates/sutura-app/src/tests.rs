@@ -685,9 +685,8 @@ fn the_same_metric_named_twice_is_refused_rather_than_deduplicated() {
     );
 }
 
-/// `top` names no metric to rank by, and this build's two rendering paths (SQL, the in-process
-/// engine) disagree about which measure it would mean once more than one is named - refused at
-/// compile time rather than ranking by whichever measure an adapter happens to read.
+/// A multi-metric `top` is retained in the compiled plan so the executor can rank the combined
+/// measures instead of refusing the question before planning.
 #[test]
 fn top_with_more_than_one_metric_is_refused_before_a_plan_exists() {
     let column = |raw: &str| ColumnName::parse(raw).expect("a test column is a column");
@@ -763,12 +762,6 @@ fn top_with_more_than_one_metric_is_refused_before_a_plan_exists() {
         &sutura_domain::pinned::view::ScopedView::everything(&pinned),
         sutura_domain::plan::Ceilings::DEFAULT,
     )
-    .expect("a refusal is not a compile error");
-    let sutura_semantic::Compiled::Refused { reason } = compiled else {
-        panic!("expected a refusal, got {compiled:?}");
-    };
-    assert!(
-        matches!(reason, RefusalReason::MultiMetricTopNotExecutable { ref metrics } if metrics.len() == 2),
-        "{reason:?}"
-    );
+    .expect("a planned question is not a compile error");
+    assert!(matches!(compiled, sutura_semantic::Compiled::Planned { .. }), "{compiled:?}");
 }

@@ -115,8 +115,8 @@ pub(crate) enum PlanError {
     /// The planner built arms that [`DrillAcrossPlan::new`] then rejected.
     ///
     /// [`NotAssembled`](Self::NotAssembled)'s argument again: every arm is built from the same
-    /// question, so its keys, bucket and range agree, no metric is named twice, and a `top` is refused
-    /// when the question resolves. The one variant a caller could cause, a question over more legs than
+    /// question, so its keys, bucket and range agree and no metric is named twice. A whole-question
+    /// `top` is carried by the drill-across plan and applied after the arms join. The one variant a caller could cause, a question over more legs than
     /// [`MAX_LEGS`](sutura_domain::plan::MAX_LEGS), is refused against the deployment's
     /// [`LegCeiling`](sutura_domain::plan::LegCeiling) - at most `MAX_LEGS` - before the plan is built.
     #[error(transparent)]
@@ -178,7 +178,7 @@ pub(crate) fn plan(resolution: &Resolution<'_>, ceilings: PlanCeilings) -> Resul
         0 => Ok(Plan::Mono(Box::new(mono_plan(resolution, measure)?))),
         legs if legs > ceilings.lookup_legs().get() => Err(too_many_lookup_legs(legs, ceilings)),
         _ => {
-            let planned = federated_plan(resolution, measure, &lookups)?;
+            let planned = federated_plan(resolution, measure, &lookups, true)?;
             bounded_legs(planned.legs().len(), ceilings.legs())?;
             bounded_sources(planned.sources(), ceilings.sources())?;
             Ok(Plan::Federated(Box::new(planned)))

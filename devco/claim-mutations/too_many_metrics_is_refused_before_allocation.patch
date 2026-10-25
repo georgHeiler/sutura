@@ -1,12 +1,11 @@
 diff --git a/crates/sutura-domain/src/query/methods.rs b/crates/sutura-domain/src/query/methods.rs
 --- a/crates/sutura-domain/src/query/methods.rs
 +++ b/crates/sutura-domain/src/query/methods.rs
-@@ -121,7 +121,7 @@
+@@ -121,6 +121,6 @@
      pub const fn code(&self) -> &'static str {
          match self {
              Self::MetricUnknown { .. } => "metric_unknown",
 -            Self::TooManyMetrics { .. } => "too_many_metrics",
 +            Self::TooManyMetrics { .. } => "killed",
              Self::DuplicateMetricName { .. } => "duplicate_metric_name",
-             Self::MultiMetricTopNotExecutable { .. } => "multi_metric_top_not_executable",
              Self::GrainNotSupported { .. } => "grain_not_supported",

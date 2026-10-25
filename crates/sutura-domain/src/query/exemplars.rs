@@ -60,9 +60,6 @@ pub fn every_refusal() -> Vec<RefusalReason> {
         RefusalReason::DuplicateMetricName {
             metric: metric("revenue"),
         },
-        RefusalReason::MultiMetricTopNotExecutable {
-            metrics: vec![metric("revenue"), metric("margin")],
-        },
         RefusalReason::GrainNotSupported {
             metric: metric("revenue"),
             grain: Grain::Year,
@@ -158,7 +155,6 @@ pub fn every_refusal() -> Vec<RefusalReason> {
             | RefusalReason::DimensionNotConformed { .. }
             | RefusalReason::QuestionNeedsTooManyLegs { .. }
             | RefusalReason::DuplicateMetricName { .. }
-            | RefusalReason::MultiMetricTopNotExecutable { .. }
             | RefusalReason::GrainNotSupported { .. }
             | RefusalReason::DimensionNotPermitted { .. }
             | RefusalReason::DimensionNotFilterable { .. }

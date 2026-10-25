@@ -256,16 +256,6 @@ pub(crate) fn resolve<'a>(query: &Query, view: &ScopedView<'a>, row_ceiling: Row
         }
         .into());
     }
-    // `top` names no metric to rank by, and the two rendering paths (SQL, the in-process engine)
-    // disagree about which measure column it means once there is more than one - refused here
-    // rather than ranking by whichever measure an adapter happens to read.
-    if query.top().is_some() && query.metrics().len() > 1 {
-        return Err(RefusalReason::MultiMetricTopNotExecutable {
-            metrics: query.metrics().iter().cloned().collect(),
-        }
-        .into());
-    }
-
     let mut seen: BTreeSet<&DimensionName> = BTreeSet::new();
     for name in query.dimensions() {
         if !seen.insert(name) {
