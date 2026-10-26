@@ -56,7 +56,6 @@ pub(crate) fn refused(reason: &RefusalReason) -> (&'static str, String) {
         RefusalReason::DuplicateMetricName { ref metric } => {
             format!("`{metric}` is listed more than once")
         }
-        RefusalReason::MultiMetricTopNotExecutable { ref metrics } => multi_metric_top_not_executable(metrics),
         RefusalReason::GrainNotSupported { ref metric, grain } => {
             format!("`{metric}` is not defined at `{grain}` grain")
         }
@@ -245,18 +244,6 @@ pub(crate) fn refused(reason: &RefusalReason) -> (&'static str, String) {
     (code, detail)
 }
 
-fn metric_names(metrics: &[sutura_domain::model::MetricName]) -> String {
-    let names: Vec<&str> = metrics.iter().map(sutura_domain::model::MetricName::as_str).collect();
-    names.join(", ")
-}
-
-fn multi_metric_top_not_executable(metrics: &[sutura_domain::model::MetricName]) -> String {
-    format!(
-        "{} were asked together with `top`, which names no metric to rank by",
-        metric_names(metrics)
-    )
-}
-
 fn dimension_not_conformed(
     dimension: &sutura_domain::model::DimensionName,
     first: &sutura_domain::model::MetricName,
@@ -335,9 +322,6 @@ mod tests {
             },
             RefusalReason::QuestionNeedsTooManyLegs { legs: 8, limit: 6 },
             RefusalReason::DuplicateMetricName { metric: metric() },
-            RefusalReason::MultiMetricTopNotExecutable {
-                metrics: vec![metric(), MetricName::parse("margin").expect("a test metric is a metric")],
-            },
             RefusalReason::GrainNotSupported {
                 metric: metric(),
                 grain: Grain::Week,

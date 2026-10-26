@@ -2,18 +2,6 @@
 
 use sutura_domain::model::{DimensionName, MetricName, SourceName};
 
-/// The metrics a refusal names, comma-joined - catalog-authored names, safe to echo back.
-fn joined_metric_names(metrics: &[MetricName]) -> String {
-    metrics.iter().map(MetricName::as_str).collect::<Vec<_>>().join(", ")
-}
-
-pub(super) fn multi_metric_top_not_executable(metrics: &[MetricName]) -> String {
-    format!(
-        "{} were asked together with `top`, which names no metric to rank by",
-        joined_metric_names(metrics)
-    )
-}
-
 pub(super) fn dimension_not_conformed(dimension: &DimensionName, first: &MetricName, other: &MetricName) -> String {
     format!(
         "`{dimension}` does not end on the same model and column for `{first}` and `{other}`, so it \

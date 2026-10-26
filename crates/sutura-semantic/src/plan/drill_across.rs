@@ -37,11 +37,16 @@ pub(super) fn plan(
     rest: &[Resolution<'_>],
     ceilings: PlanCeilings,
 ) -> Result<Plan, PlanError> {
+    let top = first.top;
     let (first, second) = (arm(first, ceilings)?, arm(second, ceilings)?);
     let rest = rest.iter().map(|each| arm(each, ceilings)).collect::<Result<Vec<_>, _>>()?;
     let legs = [&first, &second].into_iter().chain(&rest).map(|each| each.legs().len()).sum();
     bounded_legs(legs, ceilings.legs())?;
     let plan = DrillAcrossPlan::new(first, second, rest)?;
+    let plan = match top {
+        Some(top) => plan.with_top(top),
+        None => plan,
+    };
     bounded_sources(plan.sources(), ceilings.sources())?;
     Ok(Plan::DrillAcross(Box::new(plan)))
 }
@@ -52,7 +57,7 @@ fn arm(resolution: &Resolution<'_>, ceilings: PlanCeilings) -> Result<Arm, PlanE
     match lookups.len() {
         0 => local_arm(resolution, measure).map(|local| Arm::Local(Box::new(local))),
         legs if legs > ceilings.lookup_legs().get() => Err(too_many_lookup_legs(legs, ceilings)),
-        _ => federated_plan(resolution, measure, &lookups).map(|joined| Arm::Joined(Box::new(joined))),
+        _ => federated_plan(resolution, measure, &lookups, false).map(|joined| Arm::Joined(Box::new(joined))),
     }
 }
 

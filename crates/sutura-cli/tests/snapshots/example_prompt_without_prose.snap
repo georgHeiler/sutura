@@ -68,9 +68,6 @@ Every reason you can be given, and what to do about each:
   Ask for those metrics separately, or leave that dimension out.
 - **duplicate_metric_name** - the same metric was sent twice in one question.
   Send it once - refused rather than de-duplicated.
-- **multi_metric_top_not_executable** - `top` names no metric to rank by, and more than one was
-  asked.
-  Ask about one metric with `top`, or ask about several with no `top`.
 - **grain_not_supported** - the metric exists and does not declare that time resolution.
   Ask at a grain the metric lists - a finer grain is a number nobody certified.
 - **dimension_not_permitted** - the metric does not declare that dimension.

@@ -131,9 +131,6 @@ pub(crate) const PROVOKED: &[(&str, &str)] = &[
     // unlike the OTHER `ResultTooLarge` cause (a data system's own reply, see this table's own
     // note above) nothing runs for this one either.
     ("refused-top-too-many-rows", "ResultTooLarge"),
-    // `top` names no metric to rank by, and this build's two rendering paths disagree about which
-    // measure it would mean once several are asked - `github.com/telekom/sutura#968`.
-    ("refused-multi-metric-top", "MultiMetricTopNotExecutable"),
 ];
 
 /// A parameter's value as text, for comparing against what a question or a leg carried.

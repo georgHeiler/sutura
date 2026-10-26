@@ -18,6 +18,7 @@ use super::corpus::{derived, remote_products};
 use super::harness::{Side, answered, bundle, one_source, two_engines};
 
 const BY_REGION: &str = "metrics: [recurring_revenue, active_subscriptions]\ngrain: month\nrange:\n  start: 2026-06-01\n  end: 2026-07-01\ndimensions: [region]\n";
+const BY_REGION_TOP: &str = "metrics: [recurring_revenue, active_subscriptions]\ngrain: month\nrange:\n  start: 2026-06-01\n  end: 2026-07-01\ndimensions: [region]\ntop: { n: 1, by: metric, direction: desc }\n";
 const BY_FAMILY: &str = "metrics: [recurring_revenue, voice_minutes]\ngrain: month\nrange:\n  start: 2026-06-01\n  end: 2026-07-01\ndimensions: [product_family]\n";
 
 fn question(text: &str) -> Query {
@@ -58,6 +59,31 @@ fn two_metrics_by_a_remote_dimension_are_the_one_source_answer() {
     let name = "two-metrics-by-region";
     let one = rows(&one_source(bundle(&derived.one_source)), BY_REGION, name);
     let two = rows(&two_engines(bundle(&derived.two_source)), BY_REGION, name);
+    if let Err(disagreement) = agree_on_content(&one, &two, RealTolerance::DIFFERENTIAL) {
+        panic!("{name}: one source and two sources returned different rows - {disagreement}");
+    }
+    if let Err(disagreement) = agree_on_order(&one, &two, RealTolerance::DIFFERENTIAL) {
+        panic!("{name}: one source and two sources returned the rows in different orders - {disagreement}");
+    }
+}
+
+/// A whole-question top ranks the joined multi-metric answer, so the two-source result matches the
+/// single-source query and retains only the requested row.
+#[test]
+fn two_metrics_by_a_remote_dimension_apply_top_after_the_join() {
+    let derived = derived();
+    assert!(
+        matches!(compiled(&derived.one_source, BY_REGION_TOP), Compiled::Planned { .. }),
+        "on one source the two metrics and top share one statement"
+    );
+    let Compiled::DrillAcross { .. } = compiled(&derived.two_source, BY_REGION_TOP) else {
+        panic!("on two sources each metric is an arm of its own");
+    };
+    let name = "two-metrics-by-region-top";
+    let one = rows(&one_source(bundle(&derived.one_source)), BY_REGION_TOP, name);
+    let two = rows(&two_engines(bundle(&derived.two_source)), BY_REGION_TOP, name);
+    assert_eq!(one.rows().len(), 1, "the mono top keeps one row: {one:?}");
+    assert_eq!(two.rows().len(), 1, "the federated top keeps one row: {two:?}");
     if let Err(disagreement) = agree_on_content(&one, &two, RealTolerance::DIFFERENTIAL) {
         panic!("{name}: one source and two sources returned different rows - {disagreement}");
     }

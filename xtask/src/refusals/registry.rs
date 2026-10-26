@@ -74,7 +74,9 @@ const QUERY: Subject = Subject {
     // whose relationships do not name one per leg is refused. 34 since `telekom/sutura#1471` DELETED
     // `CrossModelRatioSpansSources`: a second fact on another data system joins the calendar listed
     // there, and every leg's source counts against the source ceiling.
-    variants: variants(34),
+    // 33 remains after the multi-metric planner DELETED `MultiMetricTopNotExecutable`: a whole-question
+    // top is now carried through the drill-across plan and applied after the join.
+    variants: variants(33),
 };
 
 /// One refused deployment: the settings are not fit to serve and the process does not start.

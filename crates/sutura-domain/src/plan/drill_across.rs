@@ -8,9 +8,8 @@
 //!
 //! **What this type holds, and what it does not.** It holds the arms and refuses a set of arms that
 //! cannot be joined: two arms whose keys, bucket or time range differ, one metric twice, an arm
-//! carrying a `top`, or more legs than [`MAX_LEGS`]. A `top` cuts its arm before the join, so that arm
-//! answers a null for each group it cut that another arm has, and the answer reads that null as "no
-//! rows"; a `top` for the whole question, for example by period after the join, is not built here.
+//! carrying an arm-local `top`, or more legs than [`MAX_LEGS`]. A whole-question `top` is carried
+//! here and applied by the combiner after all arms are joined.
 //! The plan names no join and no engine; the combine is a port's concern. `sutura_semantic` builds
 //! it for a question over several metrics that cannot share one statement.
 //!
@@ -33,6 +32,7 @@ use crate::nonempty::NonEmpty;
 use crate::plan::federated::{FederatedPlan, labels};
 use crate::plan::leg::LegPlan;
 use crate::plan::{AnswerKey, PlanBucket, ResultLabel};
+use crate::query::Top;
 
 /// The most legs any deployment may let one question run, over every arm, and the most a
 /// [`DrillAcrossPlan`] holds.
@@ -209,6 +209,7 @@ impl Arm {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DrillAcrossPlan {
     arms: NonEmpty<Arm>,
+    top: Option<Top>,
 }
 
 impl DrillAcrossPlan {
@@ -253,7 +254,22 @@ impl DrillAcrossPlan {
         tail.extend(rest);
         Ok(Self {
             arms: NonEmpty::of(first, tail),
+            top: None,
         })
+    }
+
+    /// Attaches a whole-question `top`, applied after every arm has been joined.
+    #[inline]
+    #[must_use]
+    pub const fn with_top(mut self, top: Top) -> Self {
+        self.top = Some(top);
+        self
+    }
+
+    /// The whole-question `top`, if this plan carries one.
+    #[inline]
+    pub const fn top(&self) -> Option<Top> {
+        self.top
     }
 
     /// The arms, in question order of their metrics.

@@ -5,7 +5,7 @@ description: A question that names several metrics runs one arm per metric and j
 
 # Drill across for several metrics
 
-Status: **accepted**. The plan type, the DataFusion merge, the leg loop, the planner and the answer path are built. A question over several metrics that cannot share one statement is planned as an arm per metric, answered, and joined above.
+Status: **accepted**. The plan type, the DataFusion merge, the leg loop, the planner and the answer path are built. A question over several metrics that cannot share one statement is planned as an arm per metric, answered, and joined above. A whole-question `top` is ranked and limited in that same merge after all arms join.
 
 ## The question
 

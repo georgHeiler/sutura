@@ -123,7 +123,6 @@ impl RefusalReason {
             Self::MetricUnknown { .. } => "metric_unknown",
             Self::TooManyMetrics { .. } => "too_many_metrics",
             Self::DuplicateMetricName { .. } => "duplicate_metric_name",
-            Self::MultiMetricTopNotExecutable { .. } => "multi_metric_top_not_executable",
             Self::GrainNotSupported { .. } => "grain_not_supported",
             Self::DimensionNotPermitted { .. } => "dimension_not_permitted",
             Self::DimensionNotConformed { .. } => "dimension_not_conformed",

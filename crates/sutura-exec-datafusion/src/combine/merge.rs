@@ -24,6 +24,7 @@ use datafusion::functions::expr_fn::coalesce;
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder};
 use datafusion::prelude::SessionContext;
 use sutura_domain::plan::{Arm, ArmLegs, DrillAcrossCombiner, DrillAcrossPlan, LocalArm};
+use sutura_domain::query::{TopBy, TopDirection};
 use sutura_domain::warehouse::ResultBatches;
 
 use super::arm::{above_expression, leaf_labels, qualified, scan, schema_mismatch};
@@ -79,9 +80,25 @@ async fn merged(
     }
     let labels: Vec<String> = grouped.iter().chain(&measures).map(|label| String::from(*label)).collect();
     let (projection, ordering) = outputs(running.schema(), &labels, grouped.len()).map_err(schema_mismatch)?;
+    let mut sorting = Vec::with_capacity(ordering.len().saturating_add(1));
+    if let Some(top) = plan.top() {
+        let primary = match top.by() {
+            TopBy::Metric => measures.last().copied(),
+            TopBy::Period => Some(plan.bucket_label()),
+        };
+        if let Some(primary) = primary {
+            let ascending = matches!(top.direction(), TopDirection::Asc);
+            sorting.push(Expr::Column(Column::new_unqualified(primary)).sort(ascending, false));
+        }
+    }
+    sorting.extend(ordering.into_iter().map(|expr| expr.sort(true, false)));
     let logical = LogicalPlanBuilder::from(running)
         .project(projection)
-        .and_then(|projected| projected.sort_by(ordering))
+        .and_then(|projected| projected.sort(sorting))
+        .and_then(|sorted| match plan.top() {
+            Some(top) => sorted.limit(0, Some(usize::try_from(top.n().get()).unwrap_or(usize::MAX))),
+            None => Ok(sorted),
+        })
         .and_then(LogicalPlanBuilder::build)
         .map_err(|cause| CombineError::Build { cause })?;
     executed(&context, logical, labels, measures.len(), ceiling_bytes, working_set).await

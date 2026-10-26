@@ -26,8 +26,7 @@ use crate::{Answering, ServiceError, SpendLedger, Warehouses};
 ///
 /// Reached only from [`Compiled::DrillAcross`](sutura_semantic::Compiled::DrillAcross). A data system
 /// that is not open, or whose adapter runs no leg, refuses the whole answer before anything is minted.
-/// A drill-across plan carries no `top`: a `top` over several metrics is refused when the question
-/// resolves.
+/// A whole-question `top` is applied by the combiner after the arms join.
 pub(crate) fn answer_drill_across<W, B, C>(
     (pinned, schema_digest): (&PinnedDefinitions, &SchemaDigest),
     plan: &DrillAcrossPlan,

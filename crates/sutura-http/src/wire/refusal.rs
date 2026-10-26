@@ -61,8 +61,8 @@ use sutura_domain::query::{RefusalReason, ResultBound};
 mod sentences;
 
 use sentences::{
-    address_outside_domains, credential_unavailable, dimension_not_conformed, multi_metric_top_not_executable,
-    resources_exhausted, too_many_legs, too_many_lookup_legs,
+    address_outside_domains, credential_unavailable, dimension_not_conformed, resources_exhausted, too_many_legs,
+    too_many_lookup_legs,
 };
 
 use super::RefusalBody;
@@ -251,10 +251,6 @@ pub(crate) fn refused(reason: &RefusalReason) -> (StatusCode, RefusalBody) {
         } => (StatusCode::CONFLICT, link_type_mismatch(relationship, fact, lookup)),
         RefusalReason::FederatedAnswerNotWellFormed { .. } => (StatusCode::CONFLICT, federated_answer_not_well_formed()),
         RefusalReason::PlanTablesShareAnIdentifier { .. } => (StatusCode::CONFLICT, plan_tables_share_an_identifier()),
-        // 409. `top` names no metric to rank by once there is more than one.
-        RefusalReason::MultiMetricTopNotExecutable { ref metrics } => {
-            (StatusCode::CONFLICT, multi_metric_top_not_executable(metrics))
-        }
         // 503, and the only refusal where retrying is a reasonable thing for a caller to do. It is
         // the variant an identity failure will use, and today it is raised by a name comparison -
         // the plan's data system against the adapter this process opened - so today's cause is a
@@ -474,7 +470,6 @@ pub(crate) const fn retry_after(reason: &RefusalReason) -> Option<u64> {
         | RefusalReason::DimensionNotConformed { .. }
         | RefusalReason::QuestionNeedsTooManyLegs { .. }
         | RefusalReason::DuplicateMetricName { .. }
-        | RefusalReason::MultiMetricTopNotExecutable { .. }
         | RefusalReason::GrainNotSupported { .. }
         | RefusalReason::DimensionNotPermitted { .. }
         | RefusalReason::DimensionNotFilterable { .. }

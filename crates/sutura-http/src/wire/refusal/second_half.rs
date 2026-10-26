@@ -58,13 +58,6 @@ pub(super) fn every_reason_the_second_half() -> Vec<Expected> {
             "plan_tables_share_an_identifier",
         ),
         (
-            RefusalReason::MultiMetricTopNotExecutable {
-                metrics: vec![metric(), MetricName::parse("margin").expect("a test metric is a metric")],
-            },
-            StatusCode::CONFLICT,
-            "multi_metric_top_not_executable",
-        ),
-        (
             RefusalReason::SourceUnavailable {
                 source: sutura_domain::model::SourceName::parse("local").expect("a test source is a source"),
             },
