@@ -17,8 +17,9 @@
 //!
 //! The parent test starts one test-process child per question and topology. Each child opens its
 //! topology, validates anchors, resets the peak window, executes exactly one question, then emits a
-//! privacy-safe result census: topology, case index and outcome class, never question, model, row,
-//! path or error. RSS is the fresh child's process high-water mark, including setup; pool peak is
+//! privacy-safe result census: topology, case index, outcome class and the domain's refusal code,
+//! never question, model, row, path or error. RSS is the fresh child's process high-water mark,
+//! including setup; pool peak is
 //! only the largest one-source engine operator-reservation peak and is not a process-memory bound.
 //! The recorder's pinned-dependency contract and the real-operator ceiling tests live in the engine
 //! crate. This file checks the measurement boundary: complete census, released reservations,
@@ -34,7 +35,7 @@ use crate::adapters::{BrokerCannotFail, deadline};
 use crate::adapters::{a_caller, shared_credential};
 use crate::adapters::{posture, source};
 use sutura_app::ServiceError;
-use sutura_domain::query::ToolOutcome;
+use sutura_domain::query::{RefusalReason, ToolOutcome};
 use sutura_domain::warehouse::UnreadableCell;
 use sutura_exec_datafusion::{CombineError, DataFusionError};
 
@@ -166,6 +167,7 @@ fn expected_failure(name: &str, error: &ServiceError<DataFusionError, BrokerCann
 struct Measurement {
     case: Case,
     census: Census,
+    refusal_reason: Option<&'static str>,
     ceiling: usize,
     peak: usize,
     reserved: usize,
@@ -193,8 +195,9 @@ impl Measurement {
             } => "failed",
             _ => "malformed",
         };
+        let reason = serde_json::to_string(&self.refusal_reason).expect("a refusal code serializes");
         format!(
-            "{{\"status\":\"{status}\",\"case\":\"{}\",\"topology\":\"{}\",\"ceiling\":{},\"peak\":{},\"reserved\":{},\"rss_baseline\":{},\"rss\":{},\"ratio\":{{\"numerator\":{},\"denominator\":{}}},\"answered\":{},\"refused\":{},\"failed\":{}}}",
+            "{{\"status\":\"{status}\",\"case\":\"{}\",\"topology\":\"{}\",\"ceiling\":{},\"peak\":{},\"reserved\":{},\"rss_baseline\":{},\"rss\":{},\"ratio\":{{\"numerator\":{},\"denominator\":{}}},\"answered\":{},\"refused\":{},\"failed\":{},\"refusal_reason\":{reason}}}",
             self.case.selector(),
             self.case.topology.label(),
             self.ceiling,
@@ -288,6 +291,7 @@ fn execute(case: Case) -> Measurement {
     Measurement {
         case,
         census,
+        refusal_reason: result.as_ref().ok().and_then(ToolOutcome::refusal).map(RefusalReason::code),
         ceiling: configured_ceiling().get(),
         peak,
         reserved,
@@ -508,6 +512,7 @@ fn rss_high_water_and_ratio_are_machine_readable() {
             refused: 1,
             failed: 0,
         },
+        refusal_reason: Some(RefusalReason::FederationNotExecutable.code()),
         ceiling: 1024,
         peak: 0,
         reserved: 0,
@@ -517,6 +522,131 @@ fn rss_high_water_and_ratio_are_machine_readable() {
     .json();
     assert_eq!(
         record,
-        "{\"status\":\"refused\",\"case\":\"two_source:7\",\"topology\":\"two_source\",\"ceiling\":1024,\"peak\":0,\"reserved\":0,\"rss_baseline\":40960,\"rss\":43008,\"ratio\":{\"numerator\":0,\"denominator\":43008},\"answered\":0,\"refused\":1,\"failed\":0}"
+        "{\"status\":\"refused\",\"case\":\"two_source:7\",\"topology\":\"two_source\",\"ceiling\":1024,\"peak\":0,\"reserved\":0,\"rss_baseline\":40960,\"rss\":43008,\"ratio\":{\"numerator\":0,\"denominator\":43008},\"answered\":0,\"refused\":1,\"failed\":0,\"refusal_reason\":\"federation_not_executable\"}"
     );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_fresh_child_reports_the_refusal_code_and_no_reason_for_an_answer_or_failure() {
+    for (name, topology, status, reason) in [
+        (
+            "two-source-a-zero-denominator-that-fails",
+            Topology::Two,
+            "refused",
+            serde_json::json!("federated_answer_not_well_formed"),
+        ),
+        (
+            "two-source-a-zero-denominator-that-fails",
+            Topology::One,
+            "failed",
+            serde_json::Value::Null,
+        ),
+        ("recurring-revenue-by-month", Topology::One, "ok", serde_json::Value::Null),
+    ] {
+        let question = every_question()
+            .iter()
+            .position(|(question, _)| question == name)
+            .expect("the corpus contains the measured question");
+        let record: serde_json::Value =
+            serde_json::from_str(&run_child(Case { topology, question })).expect("a child emits JSON");
+        assert_eq!(record["status"], status);
+        assert_eq!(record["refusal_reason"], reason);
+    }
+}
+
+fn collector_fixture(topology: Topology, question: usize, refusal_reason: Option<&'static str>) -> serde_json::Value {
+    let refused = usize::from(refusal_reason.is_some());
+    let record = Measurement {
+        case: Case { topology, question },
+        census: Census {
+            answered: 1 - refused,
+            refused,
+            failed: 0,
+        },
+        refusal_reason,
+        ceiling: 1024,
+        peak: 1,
+        reserved: 0,
+        rss_baseline: 40 * 1024,
+        rss: 42 * 1024,
+    }
+    .json();
+    serde_json::from_str(&record).expect("a fixture emits JSON")
+}
+
+fn collect_fixtures(records: &[serde_json::Value]) -> (bool, serde_json::Value) {
+    let expected_failed: u64 = records
+        .iter()
+        .map(|record| record["failed"].as_u64().expect("a fixture has a failure count"))
+        .sum();
+    let manifest = serde_json::json!({"status": "manifest", "expected": records.len(), "expected_failed": expected_failed});
+    let mut producer = records.iter().map(ToString::to_string).collect::<Vec<_>>();
+    producer.push(manifest.to_string());
+    let collector = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/measure-bounds.py");
+    let output = Command::new("python3")
+        .arg(collector)
+        .args(["python3", "-c", "import sys; print(sys.argv[1])"])
+        .arg(producer.join("\n"))
+        .output()
+        .expect("the stdlib collector starts");
+    let stdout = String::from_utf8(output.stdout).expect("the collector emits UTF-8");
+    let last = stdout.lines().last().expect("the collector emits an aggregate");
+    let aggregate = serde_json::from_str(last).expect("the aggregate is JSON");
+    (output.status.success(), aggregate)
+}
+
+#[test]
+fn the_collector_counts_reasons_per_topology_and_refuses_missing_or_misclassified_reasons() {
+    let resource = RefusalReason::ResourcesExhausted { ceiling_bytes: 1024 }.code();
+    let mut records = vec![
+        collector_fixture(Topology::One, 0, None),
+        collector_fixture(Topology::One, 1, Some(resource)),
+        collector_fixture(Topology::One, 2, None),
+        collector_fixture(Topology::Two, 0, Some(resource)),
+        collector_fixture(Topology::Two, 1, Some(RefusalReason::FederationNotExecutable.code())),
+        collector_fixture(Topology::Two, 2, None),
+    ];
+    records[2]["status"] = serde_json::json!("failed");
+    records[2]["answered"] = serde_json::json!(0);
+    records[2]["failed"] = serde_json::json!(1);
+    let (success, aggregate) = collect_fixtures(&records);
+    assert!(success, "{aggregate}");
+    assert_eq!(
+        aggregate["by_topology"],
+        serde_json::json!({
+            "one_source": {"questions": 3, "answered": 1, "refused": 1, "failed": 1,
+                "refusals_by_reason": {"resources_exhausted": 1}},
+            "two_source": {"questions": 3, "answered": 1, "refused": 2, "failed": 0,
+                "refusals_by_reason": {"federation_not_executable": 1, "resources_exhausted": 1}}
+        })
+    );
+    for reason in [
+        serde_json::Value::Null,
+        serde_json::json!(""),
+        serde_json::json!("a row value"),
+        serde_json::json!("MetricUnknown"),
+        serde_json::json!(7),
+        serde_json::json!({"metric": "revenue"}),
+    ] {
+        let mut invalid = records.clone();
+        invalid[1]["refusal_reason"] = reason;
+        let (success, aggregate) = collect_fixtures(&invalid);
+        assert!(!success, "{aggregate}");
+        assert_eq!(aggregate["failures"], 1);
+    }
+    for at in [0, 2] {
+        let mut invalid = records.clone();
+        invalid[at]["refusal_reason"] = serde_json::json!(resource);
+        assert!(
+            !collect_fixtures(&invalid).0,
+            "an answer or failure carries no refusal reason"
+        );
+    }
+    let mut missing = records;
+    let _reason = missing[1]
+        .as_object_mut()
+        .expect("a record is an object")
+        .remove("refusal_reason");
+    assert!(!collect_fixtures(&missing).0, "a refusal needs its reason");
 }
