@@ -408,6 +408,7 @@ fn every_corpus_question_has_one_fresh_child_outcome_in_each_topology() {
     }
     let cases = cases();
     let records: Vec<String> = cases.iter().map(|case| run_child(*case)).collect();
+    assert_collector_accepts(&records);
     for record in &records {
         println!("{record}");
     }
@@ -520,6 +521,7 @@ fn rss_high_water_and_ratio_are_machine_readable() {
         rss: 42 * 1024,
     }
     .json();
+    assert_collector_accepts(std::slice::from_ref(&record));
     assert_eq!(
         record,
         "{\"status\":\"refused\",\"case\":\"two_source:7\",\"topology\":\"two_source\",\"ceiling\":1024,\"peak\":0,\"reserved\":0,\"rss_baseline\":40960,\"rss\":43008,\"ratio\":{\"numerator\":0,\"denominator\":43008},\"answered\":0,\"refused\":1,\"failed\":0,\"refusal_reason\":\"federation_not_executable\"}"
@@ -548,11 +550,30 @@ fn a_fresh_child_reports_the_refusal_code_and_no_reason_for_an_answer_or_failure
             .iter()
             .position(|(question, _)| question == name)
             .expect("the corpus contains the measured question");
-        let record: serde_json::Value =
-            serde_json::from_str(&run_child(Case { topology, question })).expect("a child emits JSON");
+        let raw = run_child(Case { topology, question });
+        assert_collector_accepts(std::slice::from_ref(&raw));
+        let record: serde_json::Value = serde_json::from_str(&raw).expect("a child emits JSON");
         assert_eq!(record["status"], status);
         assert_eq!(record["refusal_reason"], reason);
     }
+}
+
+fn assert_collector_accepts(records: &[String]) {
+    let collector = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../nix/measure-bounds.py");
+    let output = Command::new("python3")
+        .args([
+            "-c",
+            "import json, runpy, sys; valid = runpy.run_path(sys.argv[1])['valid_record']; sys.exit(not all(valid(json.loads(record)) for record in sys.argv[2:]))",
+        ])
+        .arg(collector)
+        .args(records)
+        .output()
+        .expect("the collector's record validator starts");
+    assert!(
+        output.status.success(),
+        "the collector accepts every producer record: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn collector_fixture(topology: Topology, question: usize, refusal_reason: Option<&'static str>) -> serde_json::Value {
