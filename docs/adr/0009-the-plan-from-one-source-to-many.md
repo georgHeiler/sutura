@@ -1163,7 +1163,7 @@ collected batches, domain-row allocations and the separate combiner engine's res
 includes fixture setup and is not bounded by the pool. These memory readings describe this corpus and host, not a deployment envelope.
 
 The refusal fraction is refused / all questions, including expected failures in the denominator.
-The measurement emits outcome classes, not refusal reasons: these numbers do not establish how
+That measurement emitted outcome classes, not refusal reasons: these numbers do not establish how
 many questions hit a resource bound, or how many elastic execution could recover. Per-reason
 runtime counters exist separately; this harness does not collect them. The small local fixture
 cannot establish realistic refusal frequency, remote-adapter latency or a useful scaling heuristic.
@@ -1188,3 +1188,13 @@ inter-node mTLS by default, lifecycle/warm-capacity policy and the multi-machine
 proof. The decisive elastic test remains an exact differential: a question refused by one bounded
 replica equals the answer from a sufficiently large single replica. Neither measurement here
 exercises distributed execution.
+
+### Refusal classification, 2026-10-27
+
+`just measure-bounds` now preserves each refusal's existing domain code, without its fields, and
+reports per-reason counts with each topology's question, answer, refusal and expected-failure counts.
+The collector rejects a missing reason, a reason on an answer or failure, and a code of the wrong
+shape. The Rust producer selects the code from the domain's closed vocabulary; the collector checks
+its shape rather than keeping a second vocabulary. These counts distinguish resource refusals from
+other reasons on this synthetic corpus. They do not make it representative or prove that an elastic
+engine can recover a refusal.

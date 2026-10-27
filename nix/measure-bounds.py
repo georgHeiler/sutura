@@ -3,8 +3,10 @@
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+from collections import Counter
 
 RECORD_KEYS = {
     "status",
@@ -19,6 +21,7 @@ RECORD_KEYS = {
     "answered",
     "refused",
     "failed",
+    "refusal_reason",
 }
 STATUSES = ("ok", "refused", "failed")
 TOPOLOGIES = ("one_source", "two_source")
@@ -29,6 +32,15 @@ def valid_record(record):
     if not isinstance(record, dict) or set(record) != RECORD_KEYS:
         return False
     if record["status"] not in STATUSES or record["topology"] not in TOPOLOGIES:
+        return False
+    reason = record["refusal_reason"]
+    if record["status"] == "refused":
+        if (
+            not isinstance(reason, str)
+            or re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", reason) is None
+        ):
+            return False
+    elif reason is not None:
         return False
     if not isinstance(record["case"], str):
         return False
@@ -105,6 +117,25 @@ def failure_summary(records, expected, expected_failed, producer_failed, invalid
     return complete, by_status, len(cases) - len(unique)
 
 
+def topology_summary(records):
+    summary = {}
+    for topology in TOPOLOGIES:
+        selected = [record for record in records if record["topology"] == topology]
+        reasons = Counter(
+            record["refusal_reason"]
+            for record in selected
+            if record["status"] == "refused"
+        )
+        summary[topology] = {
+            "questions": len(selected),
+            "answered": sum(record["answered"] for record in selected),
+            "refused": sum(record["refused"] for record in selected),
+            "failed": sum(record["failed"] for record in selected),
+            "refusals_by_reason": dict(sorted(reasons.items())),
+        }
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -134,6 +165,7 @@ def main():
                     "failed": 0,
                     "duplicates": 0,
                     "failures": 1,
+                    "by_topology": topology_summary([]),
                 },
                 separators=(",", ":"),
             )
@@ -202,6 +234,7 @@ def main():
                 ),
                 "max_rss_per_pool_byte": max(factors, default=None),
                 "failures": int(not complete),
+                "by_topology": topology_summary(records),
             },
             separators=(",", ":"),
         )
